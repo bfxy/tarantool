@@ -57,6 +57,7 @@ relay_create(struct relay *relay, int fd, uint64_t sync)
 			 relay_send_row, relay);
 	recovery_setup_panic(relay->r, cfg_geti("panic_on_snap_error"),
 			     cfg_geti("panic_on_wal_error"));
+	relay->r->enable_wal_dir_watcher = false;
 
 	coio_init(&relay->io, fd);
 	relay->sync = sync;

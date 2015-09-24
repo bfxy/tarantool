@@ -63,4 +63,30 @@ wal_writer_start(struct recovery *state, int rows_per_wal);
 void
 wal_writer_stop(struct recovery *r);
 
+/**
+ * Receive a notification the next time a wal_write is completed
+ * (+unspecified but reasonable latency). The caller initializes the
+ * returned ev_async instance as usual. Call wal_destroy_subscription()
+ * to properly remove the subscription.
+ *
+ * Invokes ev_async_start() internally.
+ */
+ev_async *
+wal_create_subscription();
+
+/**
+ * After a notification is delivered the subscription is suspended and
+ * one calls wal_renew_subscription() to re-enable it.
+ *
+ * This was designed to prevent excessive signaling traffic when the
+ * consumer is still busy processing the previous notification.
+ * Ex: in a relay we make a mental note that WAL head was updated but we
+ * are still busy streaming the tail.
+ */
+void
+wal_renew_subscription(ev_async *);
+
+void
+wal_destroy_subscription(ev_async *);
+
 #endif /* TARANTOOL_WAL_WRITER_H_INCLUDED */

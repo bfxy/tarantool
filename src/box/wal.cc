@@ -38,6 +38,8 @@
 
 #include "xrow.h"
 
+#include "third_party/pmatomic.h"
+
 const char *wal_mode_STRS[] = { "none", "write", "fsync", NULL };
 
 /*
@@ -462,6 +464,9 @@ done:
 	return;
 }
 
+static void
+wal_broadcast_notification();
+
 /** WAL writer thread main loop.  */
 static void
 wal_writer_f(va_list ap)
@@ -482,7 +487,7 @@ wal_writer_f(va_list ap)
 
 		wal_write_to_disk(r, writer, &writer->wal_pipe.output,
 				  &commit, &rollback);
-
+		wal_broadcast_notification();
 		cbus_lock(&writer->tx_wal_bus);
 		STAILQ_CONCAT(&writer->tx_pipe.pipe, &commit);
 		if (! STAILQ_EMPTY(&rollback)) {
@@ -537,5 +542,128 @@ wal_write(struct recovery *r, struct wal_request *req)
 	if (req->res == -1)
 		return -1;
 	return vclock_sum(&r->vclock);
+}
+
+enum {
+	WAL_NOTIFY_WAIT = 1,
+	WAL_NOTIFY_DELIVERED = 2
+};
+
+struct wal_subscription {
+	uintptr_t state; /* WAL_NOTIFY_WAIT | WAL_NOTIFY_DELIVERED */
+	struct ev_loop *loop;
+	struct ev_async async;
+};
+
+enum {
+	WAL_SUBSCRIPTIONS_MAX = VCLOCK_MAX
+};
+static pthread_mutex_t wal_subscriptions_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct wal_subscription *wal_subscriptions[WAL_SUBSCRIPTIONS_MAX];
+
+static void
+wal_broadcast_notification()
+{
+	size_t i;
+	struct wal_subscription *p;
+
+	tt_pthread_mutex_lock(&wal_subscriptions_mutex);
+
+	for (i = 0;
+	     i < WAL_SUBSCRIPTIONS_MAX && (p = wal_subscriptions[i]) != NULL;
+	     i++) {
+
+		uintptr_t expected = WAL_NOTIFY_WAIT;
+		if (pm_atomic_compare_exchange_strong(
+				&p->state, &expected, WAL_NOTIFY_DELIVERED)) {
+			ev_async_send(p->loop, &p->async);
+		}
+	}
+
+	tt_pthread_mutex_unlock(&wal_subscriptions_mutex);
+}
+
+ev_async *
+wal_create_subscription()
+{
+	size_t i;
+	struct wal_subscription *subscription;
+
+	subscription = (struct wal_subscription *)calloc(1, sizeof *subscription);
+	if (subscription == NULL)
+		return NULL;
+
+	subscription->state = WAL_NOTIFY_WAIT;
+	subscription->loop = loop();
+	ev_async_init(&subscription->async,
+	              [] (struct ev_loop*, struct ev_async*, int) {});
+
+	tt_pthread_mutex_lock(&wal_subscriptions_mutex);
+	for (i = 0; i < WAL_SUBSCRIPTIONS_MAX; i++) {
+		if (wal_subscriptions[i] == NULL) {
+			wal_subscriptions[i] = subscription;
+			break;
+		}
+	}
+	tt_pthread_mutex_unlock(&wal_subscriptions_mutex);
+
+	if (i == WAL_SUBSCRIPTIONS_MAX) {
+		free(subscription);
+		return NULL;
+	}
+
+	ev_async_start(loop(), &subscription->async);
+	return &subscription->async;
+}
+
+static inline struct wal_subscription *
+wal_extract_subscription(struct ev_async *a)
+{
+	return (struct wal_subscription *)(
+		((uintptr_t)a) - offsetof(struct wal_subscription, async));
+}
+
+void
+wal_destroy_subscription(ev_async *a)
+{
+	if (a == NULL)
+		return;
+
+	struct wal_subscription *subscription = wal_extract_subscription(a);
+	size_t i, len;
+
+	tt_pthread_mutex_lock(&wal_subscriptions_mutex);
+
+	for (i = 0;
+	     i < WAL_SUBSCRIPTIONS_MAX && wal_subscriptions[i] != NULL;
+		 i++) {
+
+		/* noop */
+	}
+
+	len = i;
+
+	for (i = 0; i < len; i++) {
+		if (wal_subscriptions[i] == subscription) {
+			wal_subscriptions[i] = wal_subscriptions[len - 1];
+			wal_subscriptions[len - 1] = NULL;
+			break;
+		}
+	}
+
+	tt_pthread_mutex_unlock(&wal_subscriptions_mutex);
+
+	ev_async_stop(loop(), a);
+	free(subscription);
+}
+
+void
+wal_renew_subscription(ev_async *a)
+{
+	if (a == NULL)
+		return;
+
+	struct wal_subscription *subscription = wal_extract_subscription(a);
+	pm_atomic_store(&subscription->state, WAL_NOTIFY_WAIT);
 }
 

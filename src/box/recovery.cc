@@ -153,6 +153,7 @@ recovery_new(const char *snap_dirname, const char *wal_dirname,
 	r->apply_row = apply_row;
 	r->apply_row_param = apply_row_param;
 	r->snap_io_rate_limit = UINT64_MAX;
+	r->enable_wal_dir_watcher = true;
 
 	xdir_create(&r->snap_dir, snap_dirname, SNAP, &r->server_uuid);
 
@@ -442,10 +443,13 @@ public:
 	struct ev_stat stat;
 	struct fiber *f;
 	bool *signaled;
+	const bool enabled;
 	char path[PATH_MAX + 1];
 
 	inline void start(const char *path_arg)
 	{
+		if (!enabled)
+			return;
 		f = fiber();
 		snprintf(path, sizeof(path), "%s", path_arg);
 		ev_stat_init(&stat, recovery_stat_cb, path, 0.0);
@@ -456,8 +460,8 @@ public:
 		ev_stat_stop(loop(), &stat);
 	}
 
-	EvStat(bool *signaled_arg)
-		:signaled(signaled_arg)
+	EvStat(bool *signaled_arg, bool enabled_arg)
+		:signaled(signaled_arg), enabled(enabled_arg)
 	{
 		path[0] = '\0';
 		ev_stat_init(&stat, recovery_stat_cb, path, 0.0);
@@ -479,6 +483,45 @@ recovery_stat_cb(ev_loop * /* loop */, ev_stat *stat, int /* revents */)
 		fiber_wakeup(data->f);
 }
 
+static
+void recovery_wal_subscription_cb(ev_loop *, ev_async *async, int);
+
+class WalSubscription {
+public:
+	struct ev_async *notify;
+	struct fiber *f;
+	bool *signaled;
+
+	void renew()
+	{
+		wal_renew_subscription(notify);
+	}
+	WalSubscription(bool *signaled_arg): signaled(signaled_arg)
+	{
+		f = fiber();
+		notify = wal_create_subscription();
+		if (!notify) {
+			say_warn("Failed to subscribe to WAL notifications");
+			return;
+		}
+		notify->data = this;
+		notify->cb = recovery_wal_subscription_cb;
+	}
+	~WalSubscription()
+	{
+		wal_destroy_subscription(notify);
+	}
+};
+
+static
+void recovery_wal_subscription_cb(ev_loop *, ev_async *async, int)
+{
+	WalSubscription *ws = (WalSubscription *) async->data;
+	*ws->signaled = true;
+	if (ws->f->flags & FIBER_IS_CANCELLABLE)
+		fiber_wakeup(ws->f);
+}
+
 static void
 recovery_follow_f(va_list ap)
 {
@@ -487,12 +530,17 @@ recovery_follow_f(va_list ap)
 	fiber_set_user(fiber(), &admin_credentials);
 
 	bool signaled = false;
-	EvStat stat_dir(&signaled);
-	EvStat stat_file(&signaled);
+	EvStat stat_dir(&signaled, r->enable_wal_dir_watcher);
+	EvStat stat_file(&signaled, r->enable_wal_dir_watcher);
+	WalSubscription wal_subscription(&signaled);
 
 	stat_dir.start(r->wal_dir.dirname);
 
 	while (! fiber_is_cancelled()) {
+
+		signaled = false;
+		wal_subscription.renew();
+
 		recover_remaining_wals(r);
 
 		if (r->current_wal == NULL ||
@@ -513,7 +561,6 @@ recovery_follow_f(va_list ap)
 			fiber_yield_timeout(wal_dir_rescan_delay);
 			fiber_set_cancellable(false);
 		}
-		signaled = false;
 	}
 }
 

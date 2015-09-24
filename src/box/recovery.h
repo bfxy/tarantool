@@ -74,6 +74,7 @@ struct recovery {
 	void *apply_row_param;
 	uint64_t snap_io_rate_limit;
 	enum wal_mode wal_mode;
+	bool enable_wal_dir_watcher;
 	struct tt_uuid server_uuid;
 	uint32_t server_id;
 };
