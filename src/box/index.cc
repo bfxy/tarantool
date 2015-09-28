@@ -36,6 +36,7 @@
 #include "space.h"
 #include "iproto_constants.h"
 #include "request.h"
+#include "txn.h"
 
 const char *iterator_type_strs[] = {
 	/* [ITER_EQ]  = */ "EQ",
@@ -285,11 +286,17 @@ box_index_random(uint32_t space_id, uint32_t index_id, uint32_t rnd,
 {
 	assert(result != NULL);
 	try {
-		Index *index = check_index(space_id, index_id);
+		struct space *space = space_cache_find(space_id);
+		access_check_space(space, PRIV_R);
+		Index *index = index_find(space, index_id);
+		struct txn *txn = txn_begin_stmt(NULL, space);
+		(void)txn;
 		struct tuple *tuple = index->random(rnd);
 		*result = tuple_bless_null(tuple);
+		txn_commit_stmt(txn);
 		return 0;
 	}  catch (Exception *) {
+		txn_rollback_stmt();
 		return -1;
 	}
 }
@@ -301,7 +308,11 @@ box_index_get(uint32_t space_id, uint32_t index_id, const char *key,
 	mp_tuple_assert(key, key_end);
 	assert(result != NULL);
 	try {
-		Index *index = check_index(space_id, index_id);
+		struct space *space = space_cache_find(space_id);
+		access_check_space(space, PRIV_R);
+		Index *index = index_find(space, index_id);
+		struct txn *txn = txn_begin_stmt(NULL, space);
+		(void)txn;
 		if (!index->key_def->opts.is_unique)
 			tnt_raise(ClientError, ER_MORE_THAN_ONE_TUPLE);
 		uint32_t part_count = key ? mp_decode_array(&key) : 0;
@@ -311,8 +322,10 @@ box_index_get(uint32_t space_id, uint32_t index_id, const char *key,
 		rmean_collect(rmean_box, IPROTO_SELECT, 1);
 
 		*result = tuple_bless_null(tuple);
+		txn_commit_stmt(txn);
 		return 0;
 	}  catch (Exception *) {
+		txn_rollback_stmt();
 		return -1;
 	}
 }
@@ -324,7 +337,11 @@ box_index_min(uint32_t space_id, uint32_t index_id, const char *key,
 	mp_tuple_assert(key, key_end);
 	assert(result != NULL);
 	try {
-		Index *index = check_index(space_id, index_id);
+		struct space *space = space_cache_find(space_id);
+		access_check_space(space, PRIV_R);
+		Index *index = index_find(space, index_id);
+		struct txn *txn = txn_begin_stmt(NULL, space);
+		(void)txn;
 		if (index->key_def->type != TREE) {
 			/* Show nice error messages in Lua */
 			tnt_raise(ClientError, ER_UNSUPPORTED,
@@ -335,8 +352,10 @@ box_index_min(uint32_t space_id, uint32_t index_id, const char *key,
 		key_validate(index->key_def, ITER_GE, key, part_count);
 		struct tuple *tuple = index->min(key, part_count);
 		*result = tuple_bless_null(tuple);
+		txn_commit_stmt(txn);
 		return 0;
 	}  catch (Exception *) {
+		txn_rollback_stmt();
 		return -1;
 	}
 }
@@ -348,7 +367,11 @@ box_index_max(uint32_t space_id, uint32_t index_id, const char *key,
 	mp_tuple_assert(key, key_end);
 	assert(result != NULL);
 	try {
-		Index *index = check_index(space_id, index_id);
+		struct space *space = space_cache_find(space_id);
+		access_check_space(space, PRIV_R);
+		Index *index = index_find(space, index_id);
+		struct txn *txn = txn_begin_stmt(NULL, space);
+		(void)txn;
 		if (index->key_def->type != TREE) {
 			/* Show nice error messages in Lua */
 			tnt_raise(ClientError, ER_UNSUPPORTED,
@@ -359,8 +382,10 @@ box_index_max(uint32_t space_id, uint32_t index_id, const char *key,
 		key_validate(index->key_def, ITER_LE, key, part_count);
 		struct tuple *tuple = index->max(key, part_count);
 		*result = tuple_bless_null(tuple);
+		txn_commit_stmt(txn);
 		return 0;
 	}  catch (Exception *) {
+		txn_rollback_stmt();
 		return -1;
 	}
 }

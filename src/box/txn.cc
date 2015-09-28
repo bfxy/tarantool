@@ -47,12 +47,17 @@ fiber_set_txn(struct fiber *fiber, struct txn *txn)
 static void
 txn_add_redo(struct txn_stmt *stmt, struct request *request)
 {
+	/* skip a read request */
+	if (request == NULL) {
+		stmt->row = NULL;
+		return;
+	}
 	stmt->row = request->header;
 	if (request->header != NULL)
 		return;
 
 	/* Create a redo log row for Lua requests */
-	struct xrow_header *row= (struct xrow_header *)
+	struct xrow_header *row = (struct xrow_header *)
 		region_alloc0(&fiber()->gc, sizeof(struct xrow_header));
 	row->type = request->type;
 	row->bodycnt = request_encode(request, row->body);
@@ -65,12 +70,14 @@ txn_stmt_new(struct txn *txn)
 {
 	assert(txn->stmt == 0);
 	assert(txn->n_stmts == 0 || !txn->autocommit);
-	if (txn->n_stmts++ == 1) {
+
+	if (txn->n_stmts++ == 0) {
 		txn->stmt = &txn->first_stmt;
 	} else {
 		txn->stmt = (struct txn_stmt *)
 			region_alloc0(&fiber()->gc, sizeof(struct txn_stmt));
 	}
+
 	rlist_add_tail_entry(&txn->stmts, txn->stmt, next);
 	return txn->stmt;
 }

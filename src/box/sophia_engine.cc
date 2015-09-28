@@ -536,6 +536,7 @@ SophiaEngine::beginStatement(struct txn *txn)
 void
 SophiaEngine::prepare(struct txn *txn)
 {
+	(void)txn;
 	/* A half committed transaction is no longer
 	 * being part of concurrent index, but still can be
 	 * commited or rolled back.
@@ -549,7 +550,7 @@ SophiaEngine::prepare(struct txn *txn)
 	 */
 	sp_setint(txn->engine_tx, "half_commit", 1);
 
-	int rc = sp_prepare(txn->engine_tx);
+	int rc = sp_commit(txn->engine_tx);
 	switch (rc) {
 	case 1: /* rollback */
 		txn->engine_tx = NULL;
