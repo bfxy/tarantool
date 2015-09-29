@@ -40,6 +40,10 @@
 #include "trigger.h"
 #include "third_party/pmatomic.h"
 
+#if HAVE_PTHREAD_NP_H
+#include <pthread_np.h>
+#endif
+
 /*
  * Defines a handler to be executed on exit from cord's thread func,
  * accessible via cord()->on_exit (normally NULL). It is used to
@@ -583,9 +587,11 @@ fiber_destroy_all(struct cord *cord)
 		fiber_destroy(cord, f);
 }
 
-void
-cord_create(struct cord *cord, const char *name)
+static void
+cord_init(const char *name)
 {
+	struct cord *cord = cord();
+
 	cord->id = pthread_self();
 	cord->on_exit = NULL;
 	cord->loop = cord->id == main_thread_id ?
@@ -613,10 +619,10 @@ cord_create(struct cord *cord, const char *name)
 	ev_async_start(cord->loop, &cord->wakeup_event);
 
 	ev_idle_init(&cord->idle_event, fiber_schedule_idle);
-	snprintf(cord->name, sizeof(cord->name), "%s", name);
+	cord_set_name(name);
 }
 
-void
+static void
 cord_destroy(struct cord *cord)
 {
 	slab_cache_set_thread(&cord->slabc);
@@ -649,7 +655,7 @@ void *cord_thread_func(void *p)
 	cord() = ct_arg->cord;
 	slab_cache_set_thread(&cord()->slabc);
 	struct cord *cord = cord();
-	cord_create(cord, ct_arg->name);
+	cord_init(ct_arg->name);
 	/** Can't possibly be the main thread */
 	assert(cord->id != main_thread_id);
 	tt_pthread_mutex_lock(&ct_arg->start_mutex);
@@ -879,6 +885,32 @@ cord_costart(struct cord *cord, const char *name, fiber_func f, void *arg)
 	return 0;
 }
 
+void
+cord_set_name(const char *name)
+{
+	snprintf(cord()->name, sizeof cord()->name, "%s", name);
+	/* Main thread's name will replace process title in ps, skip it */
+	if (cord_is_main())
+		return;
+
+	/* Setting the name fails if the name was too long. Linux limits a
+	 * name to 16 bytes (including the trailing NUL), other OS don't
+	 * even bother to document the limit.
+	 */
+	char short_name[16];
+	snprintf(short_name, sizeof name, "%s", name);
+
+#if HAVE_PTHREAD_SETNAME_NP
+	pthread_setname_np(cord()->id, short_name);
+#elif HAVE_PTHREAD_SETNAME_NP_1
+	pthread_setname_np(short_name);
+#elif HAVE_PTHREAD_SET_NAME_NP
+	pthread_set_name_np(cord()->id, short_name);
+#else
+#pragma message "No suitiable function for setting thread names"
+#endif
+}
+
 bool
 cord_is_main()
 {
@@ -890,13 +922,13 @@ fiber_init(void)
 {
 	main_thread_id = pthread_self();
 	cord() = &main_cord;
-	cord_create(cord(), "main");
+	cord_init("main");
 }
 
 void
 fiber_free(void)
 {
-	cord_destroy(cord());
+	cord_destroy(&main_cord);
 }
 
 int fiber_stat(fiber_stat_cb cb, void *cb_ctx)

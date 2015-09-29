@@ -113,6 +113,31 @@ check_struct_has_member("struct stat" "st_mtimensec" "sys/stat.h"
 check_library_exists("" __libc_stack_end "" HAVE_LIBC_STACK_END)
 
 #
+# Doing it in a function to avoid polluting the toplevel namespace
+function (do_pthread_checks)
+    check_include_file(pthread_np.h HAVE_PTHREAD_NP_H)
+    if (HAVE_PTHREAD_NP_H)
+        set(INCLUDE_MISC_PTHREAD_HEADERS "#include <pthread_np.h>")
+    endif ()
+    check_c_source_compiles("
+        #include <pthread.h>
+        ${INCLUDE_MISC_PTHREAD_HEADERS}
+        int main() { pthread_setname_np(pthread_self(), \"\"); }
+        " HAVE_PTHREAD_SETNAME_NP)
+    check_c_source_compiles("
+        #include <pthread.h>
+        ${INCLUDE_MISC_PTHREAD_HEADERS}
+        int main() { pthread_setname_np(\"\"); }
+        " HAVE_PTHREAD_SETNAME_NP_1)
+    check_c_source_compiles("
+        #include <pthread.h>
+        ${INCLUDE_MISC_PTHREAD_HEADERS}
+        int main() { pthread_set_name_np(pthread_self(), \"\"); }
+        " HAVE_PTHREAD_SET_NAME_NP)
+endfunction (do_pthread_checks)
+do_pthread_checks()
+
+#
 # Enable 'make tags' target.
 #
 add_custom_target(tags COMMAND ${CTAGS} -R -f tags
