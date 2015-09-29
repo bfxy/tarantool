@@ -338,7 +338,8 @@ recovery_bootstrap(struct recovery *r)
 static void
 recover_remaining_wals(struct recovery *r)
 {
-	xdir_scan(&r->wal_dir);
+	if (r->current_wal == NULL)
+		xdir_scan(&r->wal_dir);
 
 	struct vclock *last = vclockset_last(&r->wal_dir.index);
 	if (last == NULL) {
