@@ -32,10 +32,11 @@ test_run:cmd("start server replica")
 ---
 - true
 ...
-test_run:wait_lsn('replica', 'default')
+test_run:cmd('wait_lsn replica default')
 ---
+- true
 ...
-test_run:switch('replica')
+test_run:cmd('switch replica')
 ---
 - true
 ...
@@ -165,7 +166,7 @@ box.space.test:select()
   - [122, 14884]
   - [123, 15129]
 ...
-test_run:switch('default')
+test_run:cmd('switch default')
 ---
 - true
 ...

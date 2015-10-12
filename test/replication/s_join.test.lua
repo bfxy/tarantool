@@ -10,12 +10,12 @@ box.snapshot()
 -- replica join
 test_run:cmd("create server replica with rpl_master=default, script='replication/replica.lua'")
 test_run:cmd("start server replica")
-test_run:wait_lsn('replica', 'default')
+test_run:cmd('wait_lsn replica default')
 
-test_run:switch('replica')
+test_run:cmd('switch replica')
 box.space.test:select()
 
-test_run:switch('default')
+test_run:cmd('switch default')
 test_run:cmd("stop server replica")
 test_run:cmd("cleanup server replica")
 space:drop()
