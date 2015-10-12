@@ -39,7 +39,7 @@
 #include <limits.h>
 #include <wchar.h>
 #include <wctype.h>
-#include "tuple_gen.h"
+#include "tuple_compare_gen.h"
 
 enum {
 	BOX_ENGINE_MAX = 3, /* + 1 to the actual number of engines */
