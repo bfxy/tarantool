@@ -38,10 +38,16 @@ local typetable = {
         function(x) return x > 0 end,
         [[time required for full index scan (in seconds)]]
     },
+    verbosity = {
+        'number',
+        function() return 0 end,
+        function(x) return x > 0 and x < 4 end,
+        [[verbosity of memcached logging]]
+    }
 --    flush_enabled = {
 --        'boolean',
 --        function() return true end,
---        [[ flush command availability ]]
+--        [[flush command availability]]
 --    },
 }
 
@@ -71,7 +77,7 @@ local function config_initial(cfg)
     for k, v in pairs(cfg) do newcfg[k] = v end
     local stat, err = config_check(cfg)
     if stat then return newcfg end
-    error(err)
+    box.error{ reason = err }
 end
 
 local function config_help()

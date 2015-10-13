@@ -28,8 +28,6 @@
  */
 
 #include "say.h"
-#include "coio.h"
-#include "coio_buf.h"
 #include "evio.h"
 #include "main.h"
 #include "fiber.h"
@@ -47,6 +45,8 @@
 
 #include "box/memcached.h"
 #include "box/memcached_layer.h"
+
+#include "box/memcached_network.h"
 
 static inline int
 memcached_need_txn(struct memcached_connection *con) {
@@ -87,7 +87,7 @@ memcached_process_request(struct memcached_connection *con) {
 				}
 			}
 		} else {
-			memcached_process_unknown(con);
+			memcached_bin_process_unknown(con);
 		}
 
 	} catch (Exception *e) {
@@ -187,9 +187,8 @@ memcached_parse_request(struct memcached_connection *con) {
 
 static inline ssize_t
 memcached_flush(struct memcached_connection *con) {
-	struct ev_io *coio  = con->coio;
 	struct iobuf *iobuf = con->iobuf;
-	ssize_t total = coio_writev(coio, iobuf->out.iov,
+	ssize_t total = mnet_writev(con->fd, iobuf->out.iov,
 				    obuf_iovcnt(&iobuf->out),
 				    obuf_size(&iobuf->out));
 	if (ibuf_used(&iobuf->in) == 0)
@@ -202,18 +201,17 @@ memcached_flush(struct memcached_connection *con) {
 static inline void
 memcached_loop(struct memcached_connection *con)
 {
-	struct ev_io *coio  = con->coio;
 	struct iobuf *iobuf = con->iobuf;
 	int rc = 0;
 	struct ibuf *in = &iobuf->in;
-	size_t to_read = 1;
+	size_t to_read = 24;
 
 	for (;;) {
-		ssize_t read = coio_bread(coio, in, to_read);
-		if (read <= 0)
+		ssize_t read = mnet_read_ibuf(con->fd, in, to_read);
+		if (read < to_read)
 			break;
 		con->cfg->stat.bytes_read += read;
-		to_read = 1;
+		to_read = 24;
 next:
 		rc = memcached_parse_request(con);
 		if (rc == -1) {
@@ -249,40 +247,36 @@ next:
 	}
 }
 
-static inline void
-memcached_handler(va_list ap)
+void
+memcached_handler(struct memcached_service *p, int fd)
 {
-	struct ev_io     coio       = va_arg(ap, struct ev_io);
-	struct sockaddr *addr       = va_arg(ap, struct sockaddr *);
-	socklen_t        addr_len   = va_arg(ap, socklen_t);
-	struct iobuf    *iobuf      = va_arg(ap, struct iobuf *);
-	struct memcached_service *p = va_arg(ap, struct memcached_service *);
+	struct iobuf    *iobuf      = iobuf_new();
 
 	struct memcached_connection con;
 	/* TODO: move to connection_init */
 	memset(&con, 0, sizeof(struct memcached_connection));
-	con.coio      = &coio;
+	con.fd        = fd;
 	con.iobuf     = iobuf;
 	con.write_end = obuf_create_svp(&iobuf->out);
-	memcpy(&con.addr, addr, addr_len);
-	con.addr_len  = addr_len;
-//	con.session   = session_create(con.coio->fd, *(uint64_t *)&con.addr);
+//	memcpy(&con.addr, addr, addr_len);
+//	con.addr_len  = addr_len;
+//	con.session   = session_create(con.fd, *(uint64_t *)&con.addr);
 	con.cfg       = p;
 
 	/* read-write cycle */
 	con.cfg->stat.curr_conns++;
 	con.cfg->stat.total_conns++;
-	con.cfg->stat.started = fiber_time64();
+//	con.cfg->stat.started = fiber_time64();
 	try {
 		auto scoped_guard = make_scoped_guard([&] {
-			fiber_sleep(0.01);
 			con.cfg->stat.curr_conns--;
-			evio_close(loop(), &coio);
+			close(con.fd);
 			iobuf_delete(iobuf);
 		});
 
 		memcached_loop(&con);
 		memcached_flush(&con);
+		return;
 	} catch (const FiberCancelException& e) {
 		throw;
 	} catch (const Exception& e) {
@@ -356,7 +350,6 @@ restart:
 	fiber_gc();
 
 	goto restart;
-
 }
 
 void
@@ -398,6 +391,7 @@ memcached_create(const char *name, uint32_t sid)
 	srv->expire_enabled = true;
 	srv->expire_count   = 50;
 	srv->expire_time    = 3600;
+	srv->expire_fiber   = NULL;
 	srv->space_id       = sid;
 	srv->name           = strdup(name);
 	srv->cas            = 1;
@@ -413,25 +407,21 @@ memcached_create(const char *name, uint32_t sid)
 void
 memcached_free(struct memcached_service *srv)
 {
+	memcached_stop(srv);
 	if (srv) free((void *)srv->name);
 	free (srv);
 }
 
 void
-memcached_start (struct memcached_service *srv, const char *uri)
+memcached_start (struct memcached_service *srv)
 {
-	srv->uri = uri;
 	memcached_expire_start(srv);
-	coio_service_init(&(srv->service), srv->name, memcached_handler, srv);
-	coio_service_start((struct evio_service *)&(srv->service), srv->uri);
 }
 
 void
 memcached_stop (struct memcached_service *srv)
 {
 	memcached_expire_stop(srv);
-	evio_service_stop((struct evio_service *)&(srv->service));
-//	evio_close(loop(), &(srv->service));
 	while (srv->stat.curr_conns != 0)
 		fiber_sleep(0.001);
 }
@@ -468,6 +458,14 @@ memcached_set_opt (struct memcached_service *srv, int opt, ...)
 			srv->flush_enabled = true;
 		}
 		break;
+	}
+	case MEMCACHED_OPT_VERBOSITY: {
+		int flag = va_arg(va, int);
+		if (flag > 0) {
+			srv->verbosity = (flag < 4 ? flag : 3);
+		} else if (flag > 3) {
+			srv->verbosity = 0;
+		}
 	}
 	default:
 		say_error("No such option %d", opt);

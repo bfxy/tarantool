@@ -1,12 +1,16 @@
 -- memcached.lua
 
-local ffi  = require('ffi')
-local mcfg = require('memcached_config')
+local ffi    = require('ffi')
+local mcfg   = require('memcached_config')
 package.loaded['memcached_config'] = nil
+local socket = require('socket')
+local errno  = require('errno')
+local uri    = require('uri')
+local log    = require('log')
+
+local fmt = string.format
 
 ffi.cdef[[
-typedef double time_t;
-
 struct memcached_stat {
     /* connection informations */
     unsigned int  curr_items;
@@ -15,8 +19,6 @@ struct memcached_stat {
     unsigned int  total_conns;
     uint64_t      bytes_read;
     uint64_t      bytes_written;
-    /* time when process was started */
-    time_t        started;
     /* get statistics */
     uint64_t      cmd_get;
     uint64_t      get_hits;
@@ -58,19 +60,22 @@ enum memcached_options {
     MEMCACHED_OPT_EXPIRE_ENABLED,
     MEMCACHED_OPT_EXPIRE_COUNT,
     MEMCACHED_OPT_EXPIRE_TIME,
-    MEMCACHED_OPT_FLUSH_ENABLED
+    MEMCACHED_OPT_FLUSH_ENABLED,
+    MEMCACHED_OPT_VERBOSITY,
 };
 
 struct memcached_stat *memcached_get_stat (struct memcached_service *);
 
 struct memcached_service *memcached_create(const char *, uint32_t);
-void memcached_start (struct memcached_service *, const char *);
+void memcached_start (struct memcached_service *);
 void memcached_stop  (struct memcached_service *);
 void memcached_free  (struct memcached_service *);
+
+void
+memcached_handler(struct memcached_service *p, int fd);
 ]]
 
 local memcached_services = {}
-
 local RUNNING = 'r'
 local STOPPED = 's'
 local ERRORED = 'e'
@@ -91,6 +96,7 @@ local stat_table = {
 }
 
 local conf_table = {
+    verbosity            = ffi.C.MEMCACHED_OPT_VERBOSITY,
     readahead            = ffi.C.MEMCACHED_OPT_READAHEAD,
     expire_enabled       = ffi.C.MEMCACHED_OPT_EXPIRE_ENABLED,
     expire_items_per_item= ffi.C.MEMCACHED_OPT_EXPIRE_COUNT,
@@ -103,33 +109,47 @@ local memcached_mt = {
             error('arguments must be in dictionary')
         end
         local stat, err = mcfg.check(opts or {})
-        if stat == false then error(err) end
+        if stat == false then
+            error(err)
+        end
         for k, v in pairs(opts) do
             if conf_table[k] ~= nil then
                 ffi.C.memcached_set_opt(self.service, conf_table[k], v)
             end
         end
+        return self
     end,
     start = function (self)
-        if self.status == RUNNING then
-            error("memcached '%s' is already started", self.name)
+        local function memcached_handler(socket, addr)
+            log.debug('client %s:%s connected', addr.host, addr.port)
+            ffi.C.memcached_handler(self.service, socket:fd())
         end
-        box.error.clear()
-        ffi.C.memcached_start(self.service, self.uri)
-        if box.error.last() ~= nil then
-            error("error while binding on port")
+
+        if self.status == RUNNING then
+            error(fmt("memcached '%s' is already started", self.name))
+        end
+        ffi.C.memcached_start(self.service)
+        local parsed = uri.parse(self.uri)
+        self.listener = socket.tcp_server(
+            parsed.host,
+            parsed.service, {
+                handler = memcached_handler
+        })
+        if self.listener == nil then
+            self.status = ERRORED
+            error(fmt('can\'t bind (%d) %s', errno(), errno.strerror()))
         end
         self.status = RUNNING
+        return self
     end,
     stop = function (self)
         if self.status == STOPPED then
-            error("memcached '%s' is already stopped", self.name)
+            error(fmt("memcached '%s' is already stopped", self.name))
         end
-        box.error.clear()
+        if (self.listener ~= nil) then
+            self.listener:close()
+        end
         local rc = ffi.C.memcached_stop(self.service)
-        if box.error.last() ~= nil then
-            error('error while stopping memcached')
-        end
         self.status = STOPPED
     end,
     info = function (self)
@@ -142,26 +162,31 @@ local memcached_mt = {
     end
 }
 
-local function memcached_init(opts)
+local function memcached_init(name, uri, opts)
+    opts = opts or {}
     local conf = mcfg.initial(opts)
     local instance = {}
     instance.opts = conf
-    instance.name = conf.name; instance.opts.name = nil
-    instance.uri  = conf.uri;  instance.opts.uri  = nil
-    if box.space['__mc_' .. instance.name] ~= nil then
-        error(string.format("Space with name '%s' is already created", sname))
+    instance.name = name
+    instance.uri  = uri
+    local sname = '__mc_' .. instance.name
+    if box.space[sname] ~= nil then
+        error(fmt("Space with name '%s' is already created", sname))
     end
-    instance.space = box.schema.create_space(instance.name)
-    instance.space:create_index('primary', {parts = {1, 'str'}, type = 'hash'})
+    instance.space = box.schema.create_space(sname)
+    instance.space:create_index('primary', {
+        parts = {1, 'str'},
+        type = 'hash'
+    })
     local service = ffi.C.memcached_create(instance.name, instance.space.id)
-    if service == nil then error("can't allocate memory") end
+    if service == nil then
+        error("can't allocate memory")
+    end
     instance.service = ffi.gc(service, ffi.C.memcached_free)
     memcached_services[instance.name] = setmetatable(instance,
         { __index = memcached_mt }
     )
-    instance:cfg(opts)
-    instance:start()
-    return instance
+    return instance:cfg(opts):start()
 end
 
 return {
