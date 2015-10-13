@@ -28,8 +28,10 @@ s.temporary
 _ = _space:update(s.id, {{'=', FLAGS, ''}})
 s.temporary
 
---# stop server default
---# start server default
+env = require('test_run')
+test_run = env.new('localhost', 8080)
+test_run:cmd('restart server default')
+
 FLAGS = 6
 _space = box.space._space
 
