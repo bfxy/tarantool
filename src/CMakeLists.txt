@@ -66,6 +66,7 @@ set (core_sources
      reflection.c
      assoc.c
      rmean.c
+     logger.c
  )
 
 add_library(core STATIC ${core_sources})
