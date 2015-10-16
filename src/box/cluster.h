@@ -79,6 +79,12 @@
  * and is implemented in @file vclock.h
  */
 
+void
+cluster_init(void);
+
+void
+cluster_free(void);
+
 /** {{{ Global cluster identifier API **/
 
 /** UUID of the cluster. */
@@ -110,6 +116,28 @@ cluster_set_server(const tt_uuid *server_uuid, uint32_t id);
 void
 cluster_del_server(uint32_t server_id);
 
+/** }}} **/
+
+/** {{{ Cluster applier API **/
+
+void
+cluster_add_applier(struct applier *applier);
+
+void
+cluster_del_applier(struct applier *applier);
+
+struct applier *
+cluster_find_applier(const char *source);
+
+struct applier *
+cluster_applier_first(void);
+
+struct applier *
+cluster_applier_next(struct applier *applier);
+
+#define cluster_foreach_applier(var) \
+	for (struct applier *var = cluster_applier_first(); \
+	     var != NULL; var = cluster_applier_next(var))
 /** }}} **/
 
 #endif

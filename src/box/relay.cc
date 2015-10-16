@@ -47,25 +47,26 @@
 #include "errinj.h"
 
 void
-relay_send_row(struct recovery_state *r, void *param,
-	       struct xrow_header *packet);
+relay_send_row(struct recovery *r, void *param, struct xrow_header *packet);
 
-Relay::Relay(int fd_arg, uint64_t sync_arg)
+static inline void
+relay_create(struct relay *relay, int fd, uint64_t sync)
 {
-	r = recovery_new(cfg_gets("snap_dir"), cfg_gets("wal_dir"),
-			 relay_send_row, this);
-	recovery_setup_panic(r, cfg_geti("panic_on_snap_error"),
+	memset(relay, 0, sizeof(*relay));
+	relay->r = recovery_new(cfg_gets("snap_dir"), cfg_gets("wal_dir"),
+			 relay_send_row, relay);
+	recovery_setup_panic(relay->r, cfg_geti("panic_on_snap_error"),
 			     cfg_geti("panic_on_wal_error"));
 
-	coio_init(&io);
-	io.fd = fd_arg;
-	sync = sync_arg;
-	wal_dir_rescan_delay = cfg_getd("wal_dir_rescan_delay");
+	coio_init(&relay->io, fd);
+	relay->sync = sync;
+	relay->wal_dir_rescan_delay = cfg_getd("wal_dir_rescan_delay");
 }
 
-Relay::~Relay()
+static inline void
+relay_destroy(struct relay *relay)
 {
-	recovery_delete(r);
+	recovery_delete(relay->r);
 }
 
 static inline void
@@ -81,42 +82,57 @@ relay_set_cord_name(int fd)
 }
 
 void
-replication_join_f(va_list ap)
+relay_join_f(va_list ap)
 {
-	Relay *relay = va_arg(ap, Relay *);
+	struct relay *relay = va_arg(ap, struct relay *);
 
 	relay_set_cord_name(relay->io.fd);
 
 	/* Send snapshot */
 	engine_join(relay);
 
+	say_info("snapshot sent");
 }
 
 void
-replication_join(int fd, struct xrow_header *packet,
-		 void (*on_join)(const struct tt_uuid *))
+relay_join(int fd, struct xrow_header *packet,
+	   uint32_t master_server_id,
+	   void (*on_join)(const struct tt_uuid *))
 {
-	Relay relay(fd, packet->sync);
-	struct recovery_state *r = relay.r;
+	struct relay relay;
+	relay_create(&relay, fd, packet->sync);
+	auto scope_guard = make_scoped_guard([&]{
+		relay_destroy(&relay);
+	});
+	struct recovery *r = relay.r;
 
 	struct tt_uuid server_uuid = uuid_nil;
 	xrow_decode_join(packet, &server_uuid);
 
-	cord_costart(&relay.cord, "join", replication_join_f, &relay);
+	cord_costart(&relay.cord, "join", relay_join_f, &relay);
 	cord_cojoin(&relay.cord);
+	fiber_testerror();
 	/**
 	 * Call the server-side hook which stores the replica uuid
-	 * in _cluster hook after sending the last row but before
+	 * in _cluster space after sending the last row but before
 	 * sending OK - if the hook fails, the error reaches the
 	 * client.
 	 */
 	on_join(&server_uuid);
 
-	/* Send response to JOIN command = end of stream */
+	/*
+	 * Send a response to JOIN request, an indicator of the
+	 * end of the stream of snapshot rows.
+	 */
 	struct xrow_header row;
 	xrow_encode_vclock(&row, vclockset_last(&r->snap_dir.index));
+	/*
+	 * Identify the message with the server id of this
+	 * server, this is the only way for a replica to find
+	 * out the id of the server it has connected to.
+	 */
+	row.server_id = master_server_id;
 	relay_send(&relay, &row);
-	say_info("snapshot sent");
 }
 
 static void
@@ -131,10 +147,10 @@ feed_event_f(struct trigger *trigger, void * /* event */)
  * its socket, and we get an EOF.
  */
 static void
-replication_subscribe_f(va_list ap)
+relay_subscribe_f(va_list ap)
 {
-	Relay *relay = va_arg(ap, Relay *);
-	struct recovery_state *r = relay->r;
+	struct relay *relay = va_arg(ap, struct relay *);
+	struct recovery *r = relay->r;
 
 	relay_set_cord_name(relay->io.fd);
 	recovery_follow_local(r, fiber_name(fiber()),
@@ -188,13 +204,19 @@ replication_subscribe_f(va_list ap)
 
 /** Replication acceptor fiber handler. */
 void
-replication_subscribe(int fd, struct xrow_header *packet)
+relay_subscribe(int fd, struct xrow_header *packet,
+		uint32_t master_server_id,
+		struct vclock *master_vclock)
 {
-	Relay relay(fd, packet->sync);
+	struct relay relay;
+	relay_create(&relay, fd, packet->sync);
+	auto scope_guard = make_scoped_guard([&]{
+		relay_destroy(&relay);
+	});
 
 	struct tt_uuid uu = uuid_nil, server_uuid = uuid_nil;
 
-	struct recovery_state *r = relay.r;
+	struct recovery *r = relay.r;
 	xrow_decode_subscribe(packet, &uu, &server_uuid, &r->vclock);
 
 	/**
@@ -210,36 +232,46 @@ replication_subscribe(int fd, struct xrow_header *packet)
 
 	/* Check server uuid */
 	r->server_id = schema_find_id(BOX_CLUSTER_ID, 1,
-				   tt_uuid_str(&server_uuid), UUID_STR_LEN);
+				      tt_uuid_str(&server_uuid), UUID_STR_LEN);
 	if (r->server_id == BOX_ID_NIL) {
 		tnt_raise(ClientError, ER_UNKNOWN_SERVER,
 			  tt_uuid_str(&server_uuid));
 	}
+	/*
+	 * Send a response to SUBSCRIBE request, tell
+	 * the replica how many rows we have in stock for it,
+	 * and identify ourselves with our own server id.
+	 */
+	struct xrow_header row;
+	xrow_encode_vclock(&row, master_vclock);
+	/*
+	 * Identify the message with the server id of this
+	 * server, this is the only way for a replica to find
+	 * out the id of the server it has connected to.
+	 */
+	row.server_id = master_server_id;
+	relay_send(&relay, &row);
 
 	struct cord cord;
-	cord_costart(&cord, "subscribe", replication_subscribe_f, &relay);
+	cord_costart(&cord, "subscribe", relay_subscribe_f, &relay);
 	cord_cojoin(&cord);
+	fiber_testerror();
 }
 
 void
-relay_send(Relay *relay, struct xrow_header *packet)
+relay_send(struct relay *relay, struct xrow_header *packet)
 {
 	packet->sync = relay->sync;
 	struct iovec iov[XROW_IOVMAX];
 	int iovcnt = xrow_to_iovec(packet, iov);
 	coio_writev(&relay->io, iov, iovcnt, 0);
-	ERROR_INJECT(ERRINJ_RELAY,
-	{
-		sleep(1000);
-	});
 }
 
 /** Send a single row to the client. */
 void
-relay_send_row(struct recovery_state *r, void *param,
-	       struct xrow_header *packet)
+relay_send_row(struct recovery *r, void *param, struct xrow_header *packet)
 {
-	Relay *relay = (Relay *) param;
+	struct relay *relay = (struct relay *) param;
 	assert(iproto_type_is_dml(packet->type));
 
 	/*
@@ -247,11 +279,16 @@ relay_send_row(struct recovery_state *r, void *param,
 	 * (JOIN request). In this case, send every row.
 	 * Otherwise, we're feeding a WAL, thus responding to
 	 * SUBSCRIBE request. In that case, only send a row if
-	 * it not from the same server (i.e. don't send
+	 * it is not from the same server (i.e. don't send
 	 * replica's own rows back).
 	 */
-	if (packet->server_id == 0 || packet->server_id != r->server_id)
+	if (packet->server_id == 0 || packet->server_id != r->server_id) {
 		relay_send(relay, packet);
+		ERROR_INJECT(ERRINJ_RELAY,
+		{
+			fiber_sleep(1000.0);
+		});
+	}
 	/*
 	 * Update local vclock. During normal operation wal_write()
 	 * updates local vclock. In relay mode we have to update

@@ -29,7 +29,6 @@
  * SUCH DAMAGE.
  */
 #include "cbus.h"
-#include "scoped_guard.h"
 
 struct rmean *rmean_net = NULL;
 const char *rmean_net_strings[RMEAN_NET_LAST] = {
@@ -44,9 +43,11 @@ cbus_flush_cb(ev_loop * /* loop */, struct ev_async *watcher,
 	      int /* events */);
 
 static void
-cpipe_fetch_output_cb(ev_loop * /* loop */, struct ev_async *watcher,
-			int /* events */)
+cpipe_fetch_output_cb(ev_loop *loop, struct ev_async *watcher,
+			int events)
 {
+	(void) loop;
+	(void) events;
 	struct cpipe *pipe = (struct cpipe *) watcher->data;
 	struct cmsg *msg;
 	/* Force an exchange if there is nothing to do. */
@@ -164,9 +165,11 @@ cbus_join(struct cbus *bus, struct cpipe *pipe)
 }
 
 static void
-cbus_flush_cb(ev_loop * /* loop */, struct ev_async *watcher,
-	      int /* events */)
+cbus_flush_cb(ev_loop *loop, struct ev_async *watcher,
+	      int events)
 {
+	(void) loop;
+	(void) events;
 	struct cpipe *pipe = (struct cpipe *) watcher->data;
 	if (pipe->n_input == 0)
 		return;
@@ -243,9 +246,9 @@ cmsg_notify_deliver(struct cmsg *msg)
 void
 cmsg_notify_init(struct cmsg_notify *msg)
 {
-	static cmsg_hop route[] = { { cmsg_notify_deliver, NULL }, };
+	static struct cmsg_hop route[] = { { cmsg_notify_deliver, NULL }, };
 
-	cmsg_init(msg, route);
+	cmsg_init(&msg->base, route);
 	msg->fiber = fiber();
 }
 
@@ -268,7 +271,6 @@ cpipe_fiber_pool_f(va_list ap)
 	struct cpipe *pipe = pool->pipe;
 	struct cmsg *msg;
 	pool->size++;
-	auto size_guard = make_scoped_guard([=]{ pool->size--; });
 restart:
 	while ((msg = cpipe_pop_output(pipe)))
 		cmsg_deliver(msg);
@@ -281,21 +283,22 @@ restart:
 		bool timed_out = fiber_yield_timeout(pool->idle_timeout);
 		pool->cache_size--;
 		pool->size++;
-		if (timed_out) {
-			/** Nothing to do for quite a while */
-			return;
-		}
-		goto restart;
+		if (! timed_out)
+			goto restart;
 	}
+	pool->size--;
 }
 
 
 /** Create fibers to handle all outstanding tasks. */
 static void
-cpipe_fiber_pool_cb(ev_loop * /* loop */, struct ev_async *watcher,
-		  int /* events */)
+cpipe_fiber_pool_cb(ev_loop *loop, struct ev_async *watcher,
+		  int events)
 {
-	struct cpipe_fiber_pool *pool = (struct cpipe_fiber_pool *) watcher->data;
+	(void) loop;
+	(void) events;
+	struct cpipe_fiber_pool *pool =
+		(struct cpipe_fiber_pool *) watcher->data;
 	struct cpipe *pipe = pool->pipe;
 	(void) cpipe_peek(pipe);
 	while (! STAILQ_EMPTY(&pipe->output)) {

@@ -321,12 +321,31 @@ MemtxSpace::executeUpsert(struct txn *txn, struct space *space,
 	struct tuple *old_tuple = pk->findByKey(key, part_count);
 
 	if (old_tuple == NULL) {
-		struct tuple *new_tuple = tuple_new(space->format,
-						    request->tuple,
-						    request->tuple_end);
-		TupleGuard guard(new_tuple);
-		space_validate_tuple(space, new_tuple);
-		this->replace(txn, space, NULL, new_tuple, DUP_INSERT);
+		/**
+		 * Old tuple was not found. In a "true"
+		 * non-reading-write engine, this is known only
+		 * after commit. Thus any error that can happen
+		 * at this point is ignored. Emulate this by
+		 * suppressing the error. It's logged and ignored.
+		 *
+		 * What sort of exception can happen here:
+		 * - the format of the default tuple is incorrect
+		 *   or not acceptable by this space.
+		 * - we're out of memory for a new tuple.
+		 * - unique key validation failure for the new tuple
+		 */
+		try {
+			struct tuple *new_tuple = tuple_new(space->format,
+							    request->tuple,
+							    request->tuple_end);
+			TupleGuard guard(new_tuple);
+			space_validate_tuple(space, new_tuple);
+			this->replace(txn, space, NULL,
+				      new_tuple, DUP_INSERT);
+		} catch (ClientError *e) {
+			say_error("UPSERT failed:");
+			e->log();
+		}
 	} else {
 		TupleGuard old_guard(old_tuple);
 
@@ -338,12 +357,19 @@ MemtxSpace::executeUpsert(struct txn *txn, struct space *space,
 				     request->index_base);
 		TupleGuard guard(new_tuple);
 
-		space_validate_tuple(space, new_tuple);
-		this->replace(txn, space, old_tuple, new_tuple, DUP_REPLACE);
+		/** The rest must remain silent. */
+		try {
+			space_validate_tuple(space, new_tuple);
+			this->replace(txn, space, old_tuple, new_tuple,
+				      DUP_REPLACE);
+		} catch (ClientError *e) {
+			say_error("UPSERT failed:");
+			e->log();
+		}
 	}
 
 	txn_commit_stmt(txn);
-	/* Return nothing: upsert does not return data. */
+	/* Return nothing: UPSERT does not return data. */
 }
 
 void
@@ -556,7 +582,7 @@ MemtxEngine::MemtxEngine()
  * recovery_bootstrap() should be used instead.
  */
 void
-recover_snap(struct recovery_state *r)
+recover_snap(struct recovery *r)
 {
 	/* There's no current_wal during initial recover. */
 	assert(r->current_wal == NULL);
@@ -591,7 +617,7 @@ recover_snap(struct recovery_state *r)
 void
 MemtxEngine::recoverToCheckpoint(int64_t /* lsn */)
 {
-	struct recovery_state *r = ::recovery;
+	struct recovery *r = ::recovery;
 	m_state = MEMTX_READING_SNAPSHOT;
 	/* Process existing snapshot */
 	recover_snap(r);
@@ -985,7 +1011,7 @@ struct checkpoint {
 };
 
 static void
-checkpoint_init(struct checkpoint *ckpt, struct recovery_state *recovery,
+checkpoint_init(struct checkpoint *ckpt, struct recovery *recovery,
 		int64_t lsn_arg)
 {
 	ckpt->entries = RLIST_HEAD_INITIALIZER(ckpt->entries);
@@ -1087,16 +1113,16 @@ MemtxEngine::waitCheckpoint()
 	assert(m_checkpoint);
 	assert(m_checkpoint->waiting_for_snap_thread);
 
-	int result;
-	try {
-		/* wait for memtx-part snapshot completion */
-		result = cord_cojoin(&m_checkpoint->cord);
-	} catch (Exception *e) {
+	/* wait for memtx-part snapshot completion */
+	int result = cord_cojoin(&m_checkpoint->cord);
+
+	Exception *e = (Exception *) diag_last_error(&fiber()->diag);
+	if (e != NULL) {
 		e->log();
 		result = -1;
 		SystemError *se = type_cast(SystemError, e);
 		if (se)
-			errno = se->errnum();
+			errno = se->get_errno();
 	}
 
 	m_checkpoint->waiting_for_snap_thread = false;
@@ -1134,12 +1160,12 @@ MemtxEngine::abortCheckpoint()
 	 * An error in the other engine's first phase.
 	 */
 	if (m_checkpoint->waiting_for_snap_thread) {
-		try {
-			/* wait for memtx-part snapshot completion */
-			cord_cojoin(&m_checkpoint->cord);
-		} catch (Exception *e) {
+		/* wait for memtx-part snapshot completion */
+		cord_cojoin(&m_checkpoint->cord);
+
+		Exception *e = (Exception *) diag_last_error(&fiber()->diag);
+		if (e)
 			e->log();
-		}
 		m_checkpoint->waiting_for_snap_thread = false;
 	}
 
@@ -1156,7 +1182,7 @@ MemtxEngine::abortCheckpoint()
 }
 
 void
-MemtxEngine::join(Relay *relay)
+MemtxEngine::join(struct relay *relay)
 {
 	recover_snap(relay->r);
 }

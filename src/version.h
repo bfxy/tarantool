@@ -1,5 +1,5 @@
-#ifndef TARANTOOL_OBJECT_H_INCLUDED
-#define TARANTOOL_OBJECT_H_INCLUDED
+#ifndef INCLUDES_TARANTOOL_VERSION_H
+#define INCLUDES_TARANTOOL_VERSION_H
 /*
  * Copyright 2010-2015, Tarantool AUTHORS, please see AUTHORS file.
  *
@@ -30,19 +30,41 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+#if defined(__cplusplus)
+extern "C" {
+#endif /* defined(__cplusplus) */
 
-class Object {
-public:
-	Object() {
-		/* Nothing */
-	}
+/**
+ * Pack version into uint32_t.
+ * The highest byte or result means major version, next - minor,
+ * middle - patch, last - revision.
+ */
+static inline uint32_t
+version_id(unsigned major, unsigned minor, unsigned patch)
+{
+	return (((major << 8) | minor) << 8) | patch;
+}
 
-	virtual ~Object() {
-		/* Nothing */
-	}
+static inline unsigned
+version_id_major(uint32_t version_id)
+{
+	return (version_id >> 16) & 0xff;
+}
 
-	Object(const Object&) = delete;
-	Object& operator=(const Object&) = delete;
-};
+static inline unsigned
+version_id_minor(uint32_t version_id)
+{
+	return (version_id >> 8) & 0xff;
+}
 
-#endif /* TARANTOOL_OBJECT_H_INCLUDED */
+static inline unsigned
+version_id_patch(uint32_t version_id)
+{
+	return version_id & 0xff;
+}
+
+#if defined(__cplusplus)
+} /* extern "C" */
+#endif /* defined(__cplusplus) */
+
+#endif /* INCLUDES_TARANTOOL_VERSION_H */

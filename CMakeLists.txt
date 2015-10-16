@@ -25,6 +25,7 @@ find_program(LYNX lynx)
 find_program(CAT cat)
 find_program(GIT git)
 find_program(LD ld)
+find_program(CTAGS ctags)
 
 # Define PACKAGE macro in tarantool/config.h
 set (PACKAGE "Tarantool")
@@ -54,6 +55,7 @@ include(cmake/FindReadline.cmake)
 include(cmake/FindSphinx.cmake)
 include(cmake/systemd.cmake)
 include(cmake/module.cmake)
+include(cmake/thread.cmake)
 
 if (NOT READLINE_FOUND)
     message(FATAL_ERROR "readline library not found.")
@@ -88,6 +90,15 @@ check_function_exists(fmemopen HAVE_FMEMOPEN)
 check_function_exists(funopen HAVE_FUNOPEN)
 check_function_exists(fopencookie HAVE_FOPENCOOKIE)
 check_function_exists(uuidgen HAVE_UUIDGEN)
+#
+# clock_gettime() is not defined on Mac OS X,
+# or own (slow) implementation is in third_party/clock_gettime.c
+#
+if (TARGET_OS_LINUX)
+    check_library_exists(rt clock_gettime "" HAVE_CLOCK_GETTIME)
+else()
+    check_function_exists(clock_gettime HAVE_CLOCK_GETTIME)
+endif()
 
 # Checks for libev
 include(CheckStructHasMember)
@@ -105,15 +116,16 @@ check_library_exists("" __libc_stack_end "" HAVE_LIBC_STACK_END)
 #
 # Enable 'make tags' target.
 #
-add_custom_target(tags COMMAND ctags -R -f tags
+add_custom_target(tags COMMAND ${CTAGS} -R -f tags
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_custom_target(ctags DEPENDS tags)
 
 #
 # Define PACKAGE_VERSION -- a string constant with tarantool version.
 #
 set (CPACK_PACKAGE_VERSION_MAJOR "1")
 set (CPACK_PACKAGE_VERSION_MINOR "6")
-set (CPACK_PACKAGE_VERSION_PATCH "6")
+set (CPACK_PACKAGE_VERSION_PATCH "7")
 
 set (PACKAGE_VERSION "")
 
@@ -207,10 +219,8 @@ addresses are printed." ${CMAKE_COMPILER_IS_GNUCC})
 
 set (HAVE_BFD False)
 if (ENABLE_BACKTRACE)
-    if (NOT ${CMAKE_COMPILER_IS_GNUCC} OR
-        NOT (${CMAKE_SYSTEM_PROCESSOR} MATCHES "86|amd64"))
+    if (NOT ${CMAKE_COMPILER_IS_GNUCC})
         # We only know this option to work with gcc
-        # on x86 architecture.
         message (FATAL_ERROR "ENABLE_BACKTRACE option is set but the system is not x86 based (${CMAKE_SYSTEM_PROCESSOR}) or the compiler is not GNU GCC (${CMAKE_C_COMPILER}).")
     endif()
     # Use GNU bfd if present.

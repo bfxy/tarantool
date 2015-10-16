@@ -47,6 +47,7 @@
 #include "third_party/base64.h"
 #include "coio.h"
 #include "xrow.h"
+#include "recovery.h" /* server_uuid */
 #include "iproto_constants.h"
 #include "user_def.h"
 #include "authentication.h"
@@ -747,19 +748,6 @@ net_send_msg(struct cmsg *m)
 	iproto_msg_delete(msg);
 }
 
-const char *
-iproto_greeting(const char *salt)
-{
-	static __thread char greeting[IPROTO_GREETING_SIZE + 1];
-	char base64buf[SESSION_SEED_SIZE * 4 / 3 + 5];
-
-	base64_encode(salt, SESSION_SEED_SIZE, base64buf, sizeof(base64buf));
-	snprintf(greeting, sizeof(greeting),
-		 "Tarantool %-20s %-32s\n%-63s\n",
-		 tarantool_version(), custom_proc_title, base64buf);
-	return greeting;
-}
-
 /**
  * Handshake a connection: invoke the on-connect trigger
  * and possibly authenticate. Try to send the client an error
@@ -773,8 +761,12 @@ tx_process_connect(struct cmsg *m)
 	struct obuf *out = &msg->iobuf->out;
 	try {              /* connect. */
 		con->session = session_create(con->input.fd, con->cookie);
-		obuf_dup(out, iproto_greeting(con->session->salt),
-			 IPROTO_GREETING_SIZE);
+		static __thread char greeting[IPROTO_GREETING_SIZE];
+		/* TODO: dirty read from tx thread */
+		struct tt_uuid uuid = ::recovery->server_uuid;
+		greeting_encode(greeting, tarantool_version_id(),
+				&uuid, con->session->salt, SESSION_SEED_SIZE);
+		obuf_dup(out, greeting, IPROTO_GREETING_SIZE);
 		if (! rlist_empty(&session_on_connect))
 			session_run_on_connect_triggers(con->session);
 		msg->write_end = obuf_create_svp(out);
@@ -949,7 +941,7 @@ struct iproto_set_listen_msg: public cmsg
 static void
 iproto_on_bind(void *arg)
 {
-	cpipe_push(&tx_pipe, (struct cmsg_notify *) arg);
+	cpipe_push(&tx_pipe, (struct cmsg *) arg);
 }
 
 static void
@@ -1005,7 +997,7 @@ iproto_set_listen(const char *uri)
 	fiber_yield();
 	if (! diag_is_empty(&msg.diag)) {
 		diag_move(&msg.diag, &fiber()->diag);
-		diag_last_error(&fiber()->diag)->raise();
+		fiber_testerror();
 	}
 }
 

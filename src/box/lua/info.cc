@@ -31,13 +31,15 @@
 
 #include "info.h"
 
+#include <ctype.h> /* tolower() */
+
 extern "C" {
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
 } /* extern "C" */
 
-#include "box/replica.h"
+#include "box/applier.h"
 #include "box/recovery.h"
 #include "box/cluster.h"
 #include "main.h"
@@ -48,28 +50,40 @@ extern "C" {
 static int
 lbox_info_replication(struct lua_State *L)
 {
-	struct recovery_state *r = recovery;
-	struct replica *replica = &r->replica;
-
 	lua_newtable(L);
 
+	struct applier *applier = cluster_applier_first();
+	if (applier == NULL) {
+		lua_pushstring(L, "status");
+		lua_pushstring(L, "off");
+		lua_settable(L, -3);
+		return 1;
+	}
+
+	/* Get applier state in lower case */
+	static char status[16];
+	char *d = status;
+	const char *s = applier_state_strs[applier->state] + strlen("APPLIER_");
+	assert(strlen(s) < sizeof(status));
+	while ((*(d++) = tolower(*(s++))));
+
 	lua_pushstring(L, "status");
-	lua_pushstring(L, replica->status);
+	lua_pushstring(L, status);
 	lua_settable(L, -3);
 
-	if (replica->reader) {
+	if (applier->reader) {
 		lua_pushstring(L, "lag");
-		lua_pushnumber(L, replica->lag);
+		lua_pushnumber(L, applier->lag);
 		lua_settable(L, -3);
 
 		lua_pushstring(L, "idle");
-		lua_pushnumber(L, ev_now(loop()) - replica->last_row_time);
+		lua_pushnumber(L, ev_now(loop()) - applier->last_row_time);
 		lua_settable(L, -3);
 
-		Exception *e = diag_last_error(&replica->reader->diag);
+		struct error *e = diag_last_error(&applier->reader->diag);
 		if (e != NULL) {
 			lua_pushstring(L, "message");
-			lua_pushstring(L, e->errmsg());
+			lua_pushstring(L, e->errmsg);
 			lua_settable(L, -3);
 		}
 	}
@@ -223,54 +237,4 @@ box_lua_info_init(struct lua_State *L)
 	lbox_info_init_static_values(L);
 
 	lua_pop(L, 1); /* info module */
-}
-
-void sophia_info(void (*)(const char*, const char*, int, void*), void*);
-
-static void
-lbox_sophia_cb(const char *key, const char *value, int /* pos */, void *arg)
-{
-	struct lua_State *L;
-	L = (struct lua_State*)arg;
-	if (value == NULL)
-		return;
-	lua_pushstring(L, key);
-	lua_pushstring(L, value);
-	lua_settable(L, -3);
-}
-
-/**
- * When user invokes box.sophia(), return a table of key/value
- * pairs containing the current info.
- */
-static int
-lbox_sophia_call(struct lua_State *L)
-{
-	lua_newtable(L);
-	sophia_info(lbox_sophia_cb, (void*)L);
-	return 1;
-}
-
-/** Initialize box.sophia package. */
-void
-box_lua_sophia_init(struct lua_State *L)
-{
-	static const struct luaL_reg sophialib [] = {
-		{NULL, NULL}
-	};
-
-	luaL_register_module(L, "box.sophia", sophialib);
-
-	lua_newtable(L);
-
-	lua_pushstring(L, "__call");
-	lua_pushcfunction(L, lbox_sophia_call);
-	lua_settable(L, -3);
-
-	lua_pushstring(L, "__serialize");
-	lua_pushcfunction(L, lbox_sophia_call);
-	lua_settable(L, -3);
-
-	lua_setmetatable(L, -2);
-	lua_pop(L, 1);
 }

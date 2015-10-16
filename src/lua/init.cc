@@ -97,7 +97,8 @@ extern char strict_lua[],
 	dis_x64_lua[],
 	dump_lua[],
 	csv_lua[],
-	v_lua[];
+	v_lua[],
+	clock_lua[];
 
 #if LUAJIT_VERSION_NUM >= 20100 /* LuaJIT 2.1+ */
 extern char p_lua[], zone_lua[];
@@ -117,6 +118,7 @@ static const char *lua_modules[] = {
 	"uri", uri_lua,
 	"fio", fio_lua,
 	"csv", csv_lua,
+	"clock", clock_lua,
 	"socket", bsdsocket_lua,
 	"console", console_lua,
 	"tap", tap_lua,
@@ -276,12 +278,12 @@ tarantool_lua_setpaths(struct lua_State *L)
 	lua_concat(L, lua_gettop(L) - top);
 	lua_setfield(L, top, "path");
 
-	lua_pushliteral(L, "./?.so;");
+	lua_pushliteral(L, "./?." TARANTOOL_LIBEXT ";");
 	if (home != NULL) {
 		lua_pushstring(L, home);
-		lua_pushliteral(L, "/.luarocks/lib/lua/5.1/?.so;");
+		lua_pushliteral(L, "/.luarocks/lib/lua/5.1/?." TARANTOOL_LIBEXT ";");
 		lua_pushstring(L, home);
-		lua_pushliteral(L, "/.luarocks/lib/lua/?.so;");
+		lua_pushliteral(L, "/.luarocks/lib/lua/?." TARANTOOL_LIBEXT ";");
 	}
 	lua_pushliteral(L, MODULE_LIBPATH ";");
 	lua_getfield(L, top, "cpath");
@@ -325,6 +327,11 @@ luaopen_tarantool(lua_State *L)
 	/* build.compiler */
 	lua_pushstring(L, "compiler");
 	lua_pushstring(L, COMPILER_INFO);
+	lua_settable(L, -3);
+
+	/* build.mod_format */
+	lua_pushstring(L, "mod_format");
+	lua_pushstring(L, TARANTOOL_LIBEXT);
 	lua_settable(L, -3);
 
 	/* build.flags */
@@ -439,15 +446,6 @@ tarantool_lua_slab_cache()
 	return &cord()->slabc;
 }
 
-extern "C" const char *
-tarantool_error_message(void)
-{
-	/* called only from error handler */
-	Exception *e = diag_last_error(&fiber()->diag);
-	assert(e != NULL);
-	return e->errmsg();
-}
-
 /**
  * Execute start-up script.
  */
@@ -491,7 +489,7 @@ run_script(va_list ap)
 			lua_pushstring(L, argv[i]);
 		lbox_call(L, lua_gettop(L) - 1, 0);
 	} catch (Exception *e) {
-		panic("%s", e->errmsg());
+		panic("%s", e->get_errmsg());
 	}
 
 	/* clear the stack from return values. */

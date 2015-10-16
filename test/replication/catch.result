@@ -56,7 +56,7 @@ test_run:cmd("stop server replica")
 ---
 - true
 ...
--- insert values on the master while replica os stopped and can't fetch them
+-- insert values on the master while replica is stopped and can't fetch them
 for i=1,100 do s:insert{i, 'this is test message12345'} end
 ---
 ...
@@ -73,14 +73,16 @@ test_run:cmd("switch replica")
 ---
 - true
 ...
--- Check that replica doesn't enter read-write mode
--- before catching up with the master: to check that we inject
--- sleep into the master relay_send function and attempt a data
--- modifying statement in replica while it's still fetching
--- data from the master.
--- In next 2 cases we try to delete tuple
--- during fetching process(local delete, remote delete)
--- case #1: delete tuple in replica
+-- Check that replica doesn't enter read-write mode before
+-- catching up with the master: to check that we inject sleep into
+-- the master relay_send function and attempt a data modifying
+-- statement in replica while it's still fetching data from the
+-- master.
+-- In the next two cases we try to delete a tuple while replica is
+-- catching up with the master (local delete, remote delete) case
+--
+-- #1: delete tuple on replica
+--
 box.space.test:len()
 ---
 - 1

@@ -214,7 +214,7 @@ local function update_param_table(table, defaults)
     if table == nil then
         return defaults
     end
-    if (defaults == nil) then
+    if defaults == nil then
         return table
     end
     for k,v in pairs(defaults) do
@@ -341,12 +341,12 @@ local function check_index_parts(parts)
     end
     if #parts % 2 ~= 0 then
         box.error(box.error.ILLEGAL_PARAMS,
-                  "options.parts: expected filed_no (number), type (string) pairs")
+                  "options.parts: expected field_no (number), type (string) pairs")
     end
     for i=1,#parts,2 do
         if type(parts[i]) ~= "number" then
             box.error(box.error.ILLEGAL_PARAMS,
-                      "options.parts: expected filed_no (number), type (string) pairs")
+                      "options.parts: expected field_no (number), type (string) pairs")
         elseif parts[i] == 0 then
             -- Lua uses one-based field numbers but _space is zero-based
             box.error(box.error.ILLEGAL_PARAMS,
@@ -356,7 +356,7 @@ local function check_index_parts(parts)
     for i=2,#parts,2 do
         if type(parts[i]) ~= "string" then
             box.error(box.error.ILLEGAL_PARAMS,
-                      "options.parts: expected filed_no (number), type (string) pairs")
+                      "options.parts: expected field_no (number), type (string) pairs")
         end
     end
 end
@@ -381,13 +381,21 @@ box.schema.index.create = function(space_id, name, options)
         dimension = 'number',
         distance = 'string',
     }
+    check_param_table(options, options_template)
     local options_defaults = {
         type = 'tree',
-        parts = { 1, 'num' },
-        unique = true,
     }
-    check_param_table(options, options_template)
     options = update_param_table(options, options_defaults)
+    local type_dependent_defaults = {
+        rtree = {parts = { 2, 'array' }, unique = false},
+        bitset = {parts = { 2, 'num' }, unique = false},
+        other = {parts = { 1, 'num' }, unique = true},
+    }
+    options_defaults = type_dependent_defaults[options.type]
+            and type_dependent_defaults[options.type]
+            or type_dependent_defaults.other
+    options = update_param_table(options, options_defaults)
+
     check_index_parts(options.parts)
     options.parts = update_index_parts(options.parts)
 
@@ -507,7 +515,7 @@ box.schema.index.alter = function(space_id, index_id, options)
     local PARTS = 6
     if type(tuple[OPTS]) == 'number' then
         -- old format
-        key_opts.unique = tuple[OPTS] == 1 and true or false
+        key_opts.unique = tuple[OPTS] == 1
         local part_count = tuple[PARTS]
         for i = 1, part_count do
             table.insert(parts, {tuple[2 * i + 4], tuple[2 * i + 5]});
@@ -1370,24 +1378,30 @@ box.schema.user.drop = function(name, opts)
     return drop(uid, opts)
 end
 
+local function info(id)
+    local _priv = box.space._priv
+    local _user = box.space._priv
+    local privs = {}
+    for _, v in pairs(_priv:select{id}) do
+        table.insert(
+            privs,
+            {privilege_name(v[5]), v[3], object_name(v[3], v[4])}
+        )
+    end
+    return privs
+end
+
 box.schema.user.info = function(user_name)
     local uid
     if user_name == nil then
         uid = box.session.uid()
     else
-        uid = user_or_role_resolve(user_name)
+        uid = user_resolve(user_name)
         if uid == nil then
             box.error(box.error.NO_SUCH_USER, user_name)
         end
     end
-    local _priv = box.space._priv
-    local _user = box.space._priv
-    local privs = {}
-    for _, v in pairs(_priv:select{uid}) do
-        table.insert(privs,
-                     {privilege_name(v[5]), v[3], object_name(v[3], v[4])})
-    end
-    return privs
+    return info(uid)
 end
 
 box.schema.role = {}
@@ -1440,7 +1454,13 @@ box.schema.role.revoke = function(user_name, ...)
     end
     return revoke(uid, user_name, ...)
 end
-box.schema.role.info = box.schema.user.info
+box.schema.role.info = function(role_name)
+    local rid = role_resolve(role_name)
+    if rid == nil then
+        box.error(box.error.NO_SUCH_ROLE, role_name)
+    end
+    return info(rid)
+end
 
 --
 -- once

@@ -31,12 +31,39 @@
 #include "box.h"
 #include "cluster.h"
 #include "recovery.h"
+#include "applier.h"
 
 /**
  * Globally unique identifier of this cluster.
- * A cluster is a set of connected replicas.
+ * A cluster is a set of connected appliers.
  */
 tt_uuid cluster_id;
+
+typedef rb_tree(struct applier) applierset_t;
+rb_proto(, applierset_, applierset_t, struct applier)
+
+static int
+applier_compare_by_source(const struct applier *a, const struct applier *b)
+{
+	return strcmp(a->source, b->source);
+}
+
+rb_gen(, applierset_, applierset_t, struct applier, link,
+       applier_compare_by_source);
+
+static applierset_t applierset; /* zeroed by linker */
+
+void
+cluster_init(void)
+{
+	applierset_new(&applierset);
+}
+
+void
+cluster_free(void)
+{
+
+}
 
 extern "C" struct vclock *
 cluster_clock()
@@ -47,7 +74,7 @@ cluster_clock()
 void
 cluster_set_server(const tt_uuid *server_uuid, uint32_t server_id)
 {
-	struct recovery_state *r = recovery;
+	struct recovery *r = ::recovery;
 	/** Checked in the before-commit trigger */
 	assert(!tt_uuid_is_nil(server_uuid));
 	assert(!cserver_id_is_reserved(server_id));
@@ -82,10 +109,42 @@ cluster_set_server(const tt_uuid *server_uuid, uint32_t server_id)
 void
 cluster_del_server(uint32_t server_id)
 {
-	struct recovery_state *r = recovery;
+	struct recovery *r = ::recovery;
 	vclock_del_server(&r->vclock, server_id);
 	if (r->server_id == server_id) {
 		r->server_id = 0;
 		box_set_ro(true);
 	}
+}
+
+void
+cluster_add_applier(struct applier *applier)
+{
+	applierset_insert(&applierset, applier);
+}
+
+void
+cluster_del_applier(struct applier *applier)
+{
+	applierset_remove(&applierset, applier);
+}
+
+struct applier *
+cluster_find_applier(const char *source)
+{
+	struct applier key;
+	snprintf(key.source, sizeof(key.source), "%s", source);
+	return applierset_search(&applierset, &key);
+}
+
+struct applier *
+cluster_applier_first(void)
+{
+	return applierset_first(&applierset);
+}
+
+struct applier *
+cluster_applier_next(struct applier *applier)
+{
+	return applierset_next(&applierset, applier);
 }

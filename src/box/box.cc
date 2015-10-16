@@ -35,7 +35,7 @@
 #include "iproto_constants.h"
 #include "recovery.h"
 #include "relay.h"
-#include "replica.h"
+#include "applier.h"
 #include <rmean.h>
 #include "main.h"
 #include "tuple.h"
@@ -55,12 +55,36 @@
 #include "cfg.h"
 #include "iobuf.h"
 #include "coio.h"
+#include "cluster.h" /* replica */
 
-struct recovery_state *recovery;
+struct recovery *recovery;
+
+/**
+ * The context of initial recovery.
+ */
+static struct recover_row_ctx {
+	/** How many rows have been recovered so far. */
+	int rows;
+	/** Yield once per 'yield' rows. */
+	int yield;
+} recover_row_ctx;
 
 bool snapshot_in_progress = false;
 static bool box_init_done = false;
 bool is_ro = true;
+
+void
+recover_row_ctx_init(struct recover_row_ctx *ctx, int rows_per_wal)
+{
+	ctx->rows = 0;
+	/**
+	 * Make the yield logic covered by the functional test
+	 * suite, which has a small setting for rows_per_wal.
+	 * Each yield can take up to 1ms if there are no events,
+	 * so we can't afford many of them during recovery.
+	 */
+	ctx->yield = (rows_per_wal >> 4)  + 1;
+}
 
 void
 process_rw(struct request *request, struct tuple **result)
@@ -75,20 +99,28 @@ process_rw(struct request *request, struct tuple **result)
 		switch (request->type) {
 		case IPROTO_INSERT:
 		case IPROTO_REPLACE:
-			tuple = space->handler->executeReplace(txn, space, request);
+			tuple = space->handler->executeReplace(txn, space,
+							       request);
 			break;
 		case IPROTO_UPDATE:
-			tuple = space->handler->executeUpdate(txn, space, request);
+			tuple = space->handler->executeUpdate(txn, space,
+							      request);
 			break;
 		case IPROTO_DELETE:
-			tuple = space->handler->executeDelete(txn, space, request);
+			tuple = space->handler->executeDelete(txn, space,
+							      request);
 			break;
 		case IPROTO_UPSERT:
+			if (space->has_unique_secondary_key) {
+				tnt_raise(ClientError,
+					  ER_UPSERT_UNIQUE_SECONDARY_KEY,
+					  space_name(space));
+			}
 			space->handler->executeUpsert(txn, space, request);
-			/** fall through */
+			tuple = NULL;
+			break;
 		default:
-			 tuple = NULL;
-
+			tuple = NULL;
 		}
 		if (result)
 			*result = tuple;
@@ -111,18 +143,25 @@ box_is_ro(void)
 }
 
 static void
-recover_row(struct recovery_state *r, void *param, struct xrow_header *row)
+recover_row(struct recovery *r, void *param, struct xrow_header *row)
 {
-	(void) param;
-	(void) r;
-	assert(r == recovery);
+	struct recover_row_ctx *ctx = (struct recover_row_ctx *) param;
+	assert(r == ::recovery);
 	assert(row->bodycnt == 1); /* always 1 for read */
+	(void) r;
+
 	struct request request;
 	request_create(&request, row->type);
 	request_decode(&request, (const char *) row->body[0].iov_base,
 		row->body[0].iov_len);
 	request.header = row;
 	process_rw(&request, NULL);
+	/**
+	 * Yield once in a while, but not too often,
+	 * mostly to allow signal handling to take place.
+	 */
+	if (++ctx->rows % ctx->yield == 0)
+		fiber_sleep(0);
 }
 
 /* {{{ configuration bindings */
@@ -144,7 +183,11 @@ box_check_uri(const char *source, const char *option_name)
 static void
 box_check_replication_source(void)
 {
-	box_check_uri(cfg_gets("replication_source"), "replication_source");
+	int count = cfg_getarr_size("replication_source");
+	for (int i = 0; i < count; i++) {
+		const char *source = cfg_getarr_elem("replication_source", i);
+		box_check_uri(source, "replication_source");
+	}
 }
 
 static enum wal_mode
@@ -189,32 +232,67 @@ box_check_config()
 	box_check_wal_mode(cfg_gets("wal_mode"));
 }
 
+/*
+ * Sync box.cfg.replication_source and cluster registry.
+ */
+static void
+box_sync_replication_source(void)
+{
+	/* Reset cfg_merge_flag for all replicas */
+	cluster_foreach_applier(applier) {
+		applier->cfg_merge_flag = false;
+	}
+
+	/* Add new replicas and set cfg_merge_flag for existing */
+	int count = cfg_getarr_size("replication_source");
+	for (int i = 0; i < count; i++) {
+		const char *source = cfg_getarr_elem("replication_source", i);
+		/* Try to find applier with the same source in the registry */
+		struct applier *applier = cluster_find_applier(source);
+		if (applier == NULL) {
+			/* Start new applier using specified source */
+			applier = applier_new(source); /* may throw */
+			cluster_add_applier(applier);
+		}
+		applier->cfg_merge_flag = true;
+	}
+
+	/* Remove replicas without cfg_merge_flag */
+	struct applier *applier = cluster_applier_first();
+	while (applier != NULL) {
+		struct applier *next = cluster_applier_next(applier);
+		if (!applier->cfg_merge_flag) {
+			applier_stop(applier); /* cancels a background fiber */
+			cluster_del_applier(applier);
+			applier_delete(applier);
+		}
+		applier = next;
+	}
+}
+
 extern "C" void
 box_set_replication_source(void)
 {
-	const char *source = cfg_gets("replication_source");
-	bool old_is_replica = recovery->replica.reader;
-	bool new_is_replica = source != NULL;
+	if (recovery->writer == NULL) {
+		/*
+		 * Do nothing, we're in local hot standby mode, the server
+		 * will automatically begin following the replica when local
+		 * hot standby mode is finished, see box_init().
+		 */
+		return;
+	}
 
-	if (old_is_replica != new_is_replica ||
-	    (old_is_replica &&
-	     (strcmp(source, recovery->replica.source) != 0))) {
+	box_sync_replication_source();
 
-		if (recovery->writer) {
-			if (old_is_replica)
-				recovery_stop_replica(recovery);
-			recovery_set_replica(recovery, source);
-			if (recovery_has_replica(recovery))
-				recovery_follow_replica(recovery);
-		} else {
-			/*
-			 * Do nothing, we're in local hot
-			 * standby mode, the server
-			 * will automatically begin following
-			 * the replica when local hot standby
-			 * mode is finished, see
-			 * box_leave_local_hot_standby_mode()
-			 */
+	/* Start all replicas from the cluster registry */
+	cluster_foreach_applier(applier) {
+		if (applier->reader == NULL) {
+			applier_start(applier, recovery);
+		} else if (applier->state == APPLIER_OFF ||
+			   applier->state == APPLIER_STOPPED) {
+			/* Re-start faulted replicas */
+			applier_stop(applier);
+			applier_start(applier, recovery);
 		}
 	}
 }
@@ -225,6 +303,29 @@ box_set_listen(void)
 	const char *uri = cfg_gets("listen");
 	box_check_uri(uri, "listen");
 	iproto_set_listen(uri);
+}
+
+/**
+ * Check if (host, port) in box.cfg.listen is equal to (host, port) in uri.
+ * Used to determine that an uri from box.cfg.replication_source is
+ * actually points to the same address as box.cfg.listen.
+ */
+static bool
+box_cfg_listen_eq(struct uri *what)
+{
+	const char *listen = cfg_gets("listen");
+	if (listen == NULL)
+		return false;
+
+	struct uri uri;
+	int rc = uri_parse(&uri, listen);
+	assert(rc == 0 && uri.service);
+	(void) rc;
+
+	return (uri.service_len == what->service_len &&
+		uri.host_len == what->host_len &&
+		memcmp(uri.service, what->service, uri.service_len) == 0 &&
+		memcmp(uri.host, what->host, uri.host_len) == 0);
 }
 
 extern "C" void
@@ -541,8 +642,9 @@ box_process_join(int fd, struct xrow_header *header)
 
 	assert(header->type == IPROTO_JOIN);
 
-	/* Process JOIN request via replication relay */
-	replication_join(fd, header, box_on_cluster_join);
+	/* Process JOIN request via a replication relay */
+	relay_join(fd, header, recovery->server_id,
+		   box_on_cluster_join);
 }
 
 void
@@ -551,15 +653,27 @@ box_process_subscribe(int fd, struct xrow_header *header)
 	/* Check permissions */
 	access_check_universe(PRIV_R);
 
-	/* process SUBSCRIBE request via replication relay */
-	replication_subscribe(fd, header);
+	/*
+	 * Process SUBSCRIBE request via replication relay
+	 * Send current recovery vector clock as a marker
+	 * of the "current" state of the master. When
+	 * replica fetches rows up to this position,
+	 * it enters read-write mode.
+	 *
+	 * @todo: this is not implemented, this is imperfect, and
+	 * this is buggy in case there is rollback followed by
+	 * a stall in updates (in this case replica may hang
+	 * indefinitely).
+	 */
+	relay_subscribe(fd, header, recovery->server_id,
+			&recovery->vclock);
 }
 
 /** Replace the current server id in _cluster */
 static void
 box_set_server_uuid()
 {
-	struct recovery_state *r = recovery;
+	struct recovery *r = ::recovery;
 	tt_uuid_create(&r->server_uuid);
 	assert(r->server_id == 0);
 	if (vclock_has(&r->vclock, 1))
@@ -597,6 +711,7 @@ box_free(void)
 	 */
 	if (box_init_done) {
 		session_free();
+		cluster_free();
 		user_cache_free();
 		schema_free();
 		tuple_free();
@@ -668,28 +783,47 @@ box_init(void)
 	 */
 	session_init();
 
+	cluster_init();
+
 	title("loading", NULL);
 
 	/* recovery initialization */
+	recover_row_ctx_init(&recover_row_ctx,
+			     cfg_geti("rows_per_wal"));
 	recovery = recovery_new(cfg_gets("snap_dir"),
 				cfg_gets("wal_dir"),
-				recover_row, NULL);
-	recovery_set_replica(recovery,
-		cfg_gets("replication_source"));
+				recover_row, &recover_row_ctx);
 	recovery_setup_panic(recovery,
 			     cfg_geti("panic_on_snap_error"),
 			     cfg_geti("panic_on_wal_error"));
 
+	/*
+	 * Initialize the cluster registry using replication_source,
+	 * but don't start replication right now.
+	 */
+	box_sync_replication_source();
+	/* Use the first replica by URI as a bootstrap leader */
+	struct applier *applier = cluster_applier_first();
 
 	if (recovery_has_data(recovery)) {
 		/* Tell Sophia engine LSN it must recover to. */
 		int64_t checkpoint_id =
 			recovery_last_checkpoint(recovery);
 		engine_recover_to_checkpoint(checkpoint_id);
-	} else if (recovery_has_replica(recovery)) {
+	} else if (applier != NULL && !box_cfg_listen_eq(&applier->uri)) {
+		/* Generate Server-UUID */
+		tt_uuid_create(&recovery->server_uuid);
+
 		/* Initialize a new replica */
 		engine_begin_join();
-		replica_bootstrap(recovery);
+
+		/* Add a surrogate server id for snapshot rows */
+		vclock_add_server(&recovery->vclock, 0);
+
+		/* Bootstrap from the first master */
+		applier_start(applier, recovery);
+		applier_wait(applier); /* throws on failure */
+
 		int64_t checkpoint_id = vclock_sum(&recovery->vclock);
 		engine_checkpoint(checkpoint_id);
 	} else {
@@ -724,8 +858,9 @@ box_init(void)
 
 	rmean_cleanup(rmean_box);
 
-	if (recovery_has_replica(recovery))
-		recovery_follow_replica(recovery);
+	/* Follow replica */
+	box_set_replication_source();
+
 	/* Enter read-write mode. */
 	if (recovery->server_id > 0)
 		box_set_ro(false);
@@ -743,7 +878,7 @@ box_load_cfg()
 		box_init();
 	} catch (Exception *e) {
 		e->log();
-		panic("can't initialize storage: %s", e->errmsg());
+		panic("can't initialize storage: %s", e->get_errmsg());
 	}
 }
 

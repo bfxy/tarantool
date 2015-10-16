@@ -30,6 +30,7 @@ lua_source(lua_sources lua/tap.lua)
 lua_source(lua_sources lua/fio.lua)
 lua_source(lua_sources lua/csv.lua)
 lua_source(lua_sources lua/strict.lua)
+lua_source(lua_sources lua/clock.lua)
 lua_source(lua_sources ../third_party/luafun/fun.lua)
 # LuaJIT jit.* library
 lua_source(lua_sources "${CMAKE_BINARY_DIR}/third_party/luajit/src/jit/bc.lua")
@@ -55,15 +56,16 @@ add_custom_target(ragel
     COMMAND ragel -G2 src/uri.rl -o src/uri.c)
 
 set (core_sources
-     say.cc
-     memory.cc
+     diag.c
+     say.c
+     memory.c
      fiber.cc
-     cbus.cc
+     cbus.c
      exception.cc
-     coro.cc
-     object.cc
+     coro.c
      reflection.c
      assoc.c
+     rmean.c
  )
 
 add_library(core STATIC ${core_sources})
@@ -82,8 +84,7 @@ set (server_sources
      coeio.cc
      iobuf.cc
      coio_buf.cc
-     pickle.cc
-     rmean.cc
+     pickle.c
      ipc.cc
      latch.cc
      errinj.cc
@@ -92,7 +93,7 @@ set (server_sources
      random.c
      scramble.c
      opts.c
-     cfg.cc
+     cfg.c
      cpu_feature.c
      fiob.c
      tt_uuid.c
@@ -109,6 +110,7 @@ set (server_sources
      lua/bsdsocket.cc
      lua/pickle.cc
      lua/fio.cc
+     lua/clock.c
      ${lua_sources}
 )
 
@@ -118,7 +120,7 @@ endif()
 
 set_source_files_compile_flags(${server_sources})
 add_library(server STATIC ${server_sources})
-target_link_libraries(server core)
+target_link_libraries(server core bit)
 
 set (common_libraries server core misc bitset msgpuck csv)
 
@@ -132,7 +134,7 @@ list(APPEND common_libraries
 )
 
 if (TARGET_OS_LINUX OR TARGET_OS_DEBIAN_FREEBSD)
-    set (common_libraries ${common_libraries} dl)
+    set (common_libraries ${common_libraries} dl rt)
 endif()
 
 if (TARGET_OS_FREEBSD AND NOT TARGET_OS_DEBIAN_FREEBSD)

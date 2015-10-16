@@ -1,8 +1,4 @@
-#ifndef TARANTOOL_REPLICA_H_INCLUDED
-#define TARANTOOL_REPLICA_H_INCLUDED
 /*
- * Copyright 2010-2015, Tarantool AUTHORS, please see AUTHORS file.
- *
  * Redistribution and use in source and binary forms, with or
  * without modification, are permitted provided that the following
  * conditions are met:
@@ -30,55 +26,28 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-
-#include <netinet/in.h>
-#include <sys/socket.h>
-
 #include "trivia/util.h"
-#include "uri.h"
-#include "third_party/tarantool_ev.h"
 
-struct recovery_state;
-
-enum { REPLICA_SOURCE_MAXLEN = 1024 }; /* enough to fit URI with passwords */
-
-/** State of a replication connection to the master */
-struct replica {
-	struct fiber *reader;
-	const char *status;
-	ev_tstamp lag, last_row_time;
-	bool warning_said;
-	char source[REPLICA_SOURCE_MAXLEN];
-	struct uri uri;
-	union {
-		struct sockaddr addr;
-		struct sockaddr_storage addrstorage;
-	};
-	socklen_t addr_len;
-};
-
-/** Connect to a master and request a snapshot.
- * Raises an exception on error.
- *
- * @return A connected socket, ready too receive
- * data.
- */
-void
-replica_bootstrap(struct recovery_state *r);
-
-void
-recovery_follow_replica(struct recovery_state *r);
-
-void
-recovery_stop_replica(struct recovery_state *r);
-
-void
-recovery_set_replica(struct recovery_state *r, const char *source);
-
-bool
-recovery_has_replica(struct recovery_state *r);
-
-void
-recovery_init_replica(struct recovery_state *r);
-
-#endif /* TARANTOOL_REPLICA_H_INCLUDED */
+int clock_gettime(uint32_t clock_id, struct timespec *tp)
+{
+	tp->tv_nsec = 0;
+	tp->tv_sec = 0;
+	uint64_t tk;
+	struct timeval tv;
+	switch (clock_id) {
+	case CLOCK_REALTIME:
+	case CLOCK_MONOTONIC:
+		gettimeofday (&tv, 0);
+		tp->tv_sec = tv.tv_sec;
+		tp->tv_nsec = tv.tv_usec * 1000;
+		break;
+	case CLOCK_PROCESS_CPUTIME_ID:
+	case CLOCK_THREAD_CPUTIME_ID:
+		tk = clock();
+		tp->tv_sec = tk / CLOCKS_PER_SEC;
+		tp->tv_nsec = (tk % CLOCKS_PER_SEC) *
+				(1000000000 / CLOCKS_PER_SEC);
+		break;
+	}
+	return 0;
+}

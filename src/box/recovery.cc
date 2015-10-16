@@ -36,7 +36,6 @@
 #include "xlog.h"
 #include "xrow.h"
 
-#include "replica.h"
 #include "cluster.h"
 #include "session.h"
 
@@ -44,7 +43,7 @@
  * Recovery subsystem
  * ------------------
  *
- * A facade of the recovery subsystem is struct recovery_state.
+ * A facade of the recovery subsystem is struct recovery.
  *
  * Depending on the configuration, start-up parameters, the
  * actual task being performed, the recovery can be
@@ -91,14 +90,14 @@
  * IR -> HS         # recovery_follow_local()
  * IRR -> RR        # recovery_follow_local()
  * HS -> M          # recovery_finalize()
- * M -> R           # recovery_follow_replica()
- * R -> M           # recovery_stop_replica()
+ * M -> R           # remote_start()
+ * R -> M           # remote_stop()
  */
 
 /* {{{ LSN API */
 
 void
-recovery_fill_lsn(struct recovery_state *r, struct xrow_header *row)
+recovery_fill_lsn(struct recovery *r, struct xrow_header *row)
 {
 	if (row->server_id == 0) {
 		/* Local request. */
@@ -119,7 +118,7 @@ recovery_fill_lsn(struct recovery_state *r, struct xrow_header *row)
 }
 
 int64_t
-recovery_last_checkpoint(struct recovery_state *r)
+recovery_last_checkpoint(struct recovery *r)
 {
 	/* recover last snapshot lsn */
 	struct vclock *vclock = vclockset_last(&r->snap_dir.index);
@@ -133,11 +132,11 @@ recovery_last_checkpoint(struct recovery_state *r)
 /**
  * Throws an exception in  case of error.
  */
-struct recovery_state *
+struct recovery *
 recovery_new(const char *snap_dirname, const char *wal_dirname,
 	     apply_row_f apply_row, void *apply_row_param)
 {
-	struct recovery_state *r = (struct recovery_state *)
+	struct recovery *r = (struct recovery *)
 			calloc(1, sizeof(*r));
 
 	if (r == NULL) {
@@ -172,21 +171,20 @@ recovery_new(const char *snap_dirname, const char *wal_dirname,
 	xdir_check(&r->wal_dir);
 
 	r->watcher = NULL;
-	recovery_init_replica(r);
 
 	guard.is_active = false;
 	return r;
 }
 
 void
-recovery_update_mode(struct recovery_state *r, enum wal_mode mode)
+recovery_update_mode(struct recovery *r, enum wal_mode mode)
 {
 	assert(mode < WAL_MODE_MAX);
 	r->wal_mode = mode;
 }
 
 void
-recovery_update_io_rate_limit(struct recovery_state *r, double new_limit)
+recovery_update_io_rate_limit(struct recovery *r, double new_limit)
 {
 	r->snap_io_rate_limit = new_limit * 1024 * 1024;
 	if (r->snap_io_rate_limit == 0)
@@ -194,7 +192,7 @@ recovery_update_io_rate_limit(struct recovery_state *r, double new_limit)
 }
 
 void
-recovery_setup_panic(struct recovery_state *r, bool on_snap_error,
+recovery_setup_panic(struct recovery *r, bool on_snap_error,
 		     bool on_wal_error)
 {
 	r->wal_dir.panic_if_error = on_wal_error;
@@ -202,7 +200,7 @@ recovery_setup_panic(struct recovery_state *r, bool on_snap_error,
 }
 
 static inline void
-recovery_close_log(struct recovery_state *r)
+recovery_close_log(struct recovery *r)
 {
 	if (r->current_wal == NULL)
 		return;
@@ -217,7 +215,7 @@ recovery_close_log(struct recovery_state *r)
 }
 
 void
-recovery_delete(struct recovery_state *r)
+recovery_delete(struct recovery *r)
 {
 	recovery_stop_local(r);
 
@@ -237,7 +235,7 @@ recovery_delete(struct recovery_state *r)
 }
 
 void
-recovery_exit(struct recovery_state *r)
+recovery_exit(struct recovery *r)
 {
 	/* Avoid fibers, there is no event loop */
 	r->watcher = NULL;
@@ -245,7 +243,7 @@ recovery_exit(struct recovery_state *r)
 }
 
 void
-recovery_atfork(struct recovery_state *r)
+recovery_atfork(struct recovery *r)
 {
        xlog_atfork(&r->current_wal);
        /*
@@ -257,7 +255,7 @@ recovery_atfork(struct recovery_state *r)
 }
 
 void
-recovery_apply_row(struct recovery_state *r, struct xrow_header *row)
+recovery_apply_row(struct recovery *r, struct xrow_header *row)
 {
 	/* Check lsn */
 	int64_t current_lsn = vclock_get(&r->vclock, row->server_id);
@@ -271,7 +269,7 @@ recovery_apply_row(struct recovery_state *r, struct xrow_header *row)
  * set l.eof_read.
  */
 void
-recover_xlog(struct recovery_state *r, struct xlog *l)
+recover_xlog(struct recovery *r, struct xlog *l)
 {
 	struct xlog_cursor i;
 
@@ -311,7 +309,7 @@ recover_xlog(struct recovery_state *r, struct xlog *l)
 }
 
 void
-recovery_bootstrap(struct recovery_state *r)
+recovery_bootstrap(struct recovery *r)
 {
 	/* Add a surrogate server id for snapshot rows */
 	vclock_add_server(&r->vclock, 0);
@@ -337,7 +335,7 @@ recovery_bootstrap(struct recovery_state *r)
  * recovery was successful.
  */
 static void
-recover_remaining_wals(struct recovery_state *r)
+recover_remaining_wals(struct recovery *r)
 {
 	xdir_scan(&r->wal_dir);
 
@@ -404,7 +402,7 @@ recover_current_wal:
 }
 
 void
-recovery_finalize(struct recovery_state *r, enum wal_mode wal_mode,
+recovery_finalize(struct recovery *r, enum wal_mode wal_mode,
 		  int rows_per_wal)
 {
 	recovery_stop_local(r);
@@ -484,7 +482,7 @@ recovery_stat_cb(ev_loop * /* loop */, ev_stat *stat, int /* revents */)
 static void
 recovery_follow_f(va_list ap)
 {
-	struct recovery_state *r = va_arg(ap, struct recovery_state *);
+	struct recovery *r = va_arg(ap, struct recovery *);
 	ev_tstamp wal_dir_rescan_delay = va_arg(ap, ev_tstamp);
 	fiber_set_user(fiber(), &admin_credentials);
 
@@ -520,7 +518,7 @@ recovery_follow_f(va_list ap)
 }
 
 void
-recovery_follow_local(struct recovery_state *r, const char *name,
+recovery_follow_local(struct recovery *r, const char *name,
 		      ev_tstamp wal_dir_rescan_delay)
 {
 	assert(r->writer == NULL);
@@ -531,13 +529,14 @@ recovery_follow_local(struct recovery_state *r, const char *name,
 }
 
 void
-recovery_stop_local(struct recovery_state *r)
+recovery_stop_local(struct recovery *r)
 {
 	if (r->watcher) {
 		struct fiber *f = r->watcher;
 		r->watcher = NULL;
 		fiber_cancel(f);
 		fiber_join(f);
+		fiber_testerror();
 	}
 }
 

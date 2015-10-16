@@ -1,3 +1,5 @@
+#ifndef INCLUDES_TARANTOOL_LUA_SOPHIA_H
+#define INCLUDES_TARANTOOL_LUA_SOPHIA_H
 /*
  * Copyright 2010-2015, Tarantool AUTHORS, please see AUTHORS file.
  *
@@ -28,47 +30,8 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-#include "coro.h"
 
-#include "trivia/config.h"
-#include "exception.h"
-#include <unistd.h>
-#include <string.h>
-#include <sys/mman.h>
+struct lua_State;
+void box_lua_sophia_init(struct lua_State *L);
 
-#include "third_party/valgrind/memcheck.h"
-#include "fiber.h"
-
-void
-tarantool_coro_create(struct tarantool_coro *coro,
-		      struct slab_cache *slabc,
-		      void (*f) (void *), void *data)
-{
-	const int page = sysconf(_SC_PAGESIZE);
-
-	memset(coro, 0, sizeof(*coro));
-
-	/* TODO: guard pages */
-	coro->stack_size = page * 16 - slab_sizeof();
-	coro->stack = (char *) slab_get(slabc, coro->stack_size)
-					+ slab_sizeof();
-
-	if (coro->stack == NULL) {
-		tnt_raise(OutOfMemory, sizeof(coro->stack_size),
-			  "mmap", "coro stack");
-	}
-
-	(void) VALGRIND_STACK_REGISTER(coro->stack, (char *)
-				       coro->stack + coro->stack_size);
-
-	coro_create(&coro->ctx, f, data, coro->stack, coro->stack_size);
-}
-
-void
-tarantool_coro_destroy(struct tarantool_coro *coro, struct slab_cache *slabc)
-{
-	if (coro->stack != NULL) {
-		slab_put(slabc, (struct slab *)
-			 ((char *) coro->stack - slab_sizeof()));
-	}
-}
+#endif /* INCLUDES_TARANTOOL_LUA_SOPHIA_H */

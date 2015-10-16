@@ -48,7 +48,7 @@ struct SophiaEngine: public Engine {
 	virtual void beginJoin();
 	virtual void recoverToCheckpoint(int64_t);
 	virtual void endRecovery();
-	virtual void join(Relay*);
+	virtual void join(struct relay *relay);
 	virtual int beginCheckpoint(int64_t);
 	virtual int waitCheckpoint();
 	virtual void commitCheckpoint();
@@ -64,7 +64,8 @@ public:
 	ev_idle idle;
 };
 
+typedef void (*sophia_info_f)(const char*, const char*, void*);
+int  sophia_info(const char*, sophia_info_f, void*);
 void sophia_error(void*);
-void sophia_info(void (*)(const char*, const char*, int, void*), void*);
 
 #endif /* TARANTOOL_BOX_SOPHIA_ENGINE_H_INCLUDED */

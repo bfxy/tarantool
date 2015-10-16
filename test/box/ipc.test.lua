@@ -15,7 +15,7 @@ ch:get()
 ch:get('wrong timeout')
 ch:get(-10)
 ch:put(234)
-ch:put(345, .5)
+ch:put(345, .1)
 ch:count()
 ch:is_full()
 ch:is_empty()
@@ -49,9 +49,6 @@ ch:get(box.info.pid) == box.info.pid
 buffer
 
 ch:is_empty()
-ch:broadcast()
-ch:broadcast(123)
-ch:get()
 
 ch:is_full()
 ch:is_empty()
@@ -84,7 +81,6 @@ ch:put(2)
 ch:put(3)
 ch:put(4)
 ch:put(5)
-ch:broadcast('broadcast message!')
 t = {}
 for i = 35, 45 do table.insert(t, ch:put(i)) end
 t

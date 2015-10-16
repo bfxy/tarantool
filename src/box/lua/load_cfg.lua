@@ -56,7 +56,7 @@ local default_cfg = {
     custom_proc_title   = nil,
     pid_file            = nil,
     background          = false,
-    username            = nil ,
+    username            = nil,
     coredump            = false,
 
     -- snapshot_daemon
@@ -99,7 +99,7 @@ local template_cfg = {
     wal_dir_rescan_delay= 'number',
     panic_on_snap_error = 'boolean',
     panic_on_wal_error  = 'boolean',
-    replication_source  = 'string, number',
+    replication_source  = 'string, number, table',
     custom_proc_title   = 'string',
     pid_file            = 'string',
     background          = 'boolean',
@@ -289,3 +289,12 @@ box.cfg = load_cfg
 jit.off(load_cfg)
 jit.off(reload_cfg)
 jit.off(box.cfg)
+
+-- gh-810:
+-- hack luajit default cpath
+-- commented out because we fixed luajit to build properly, see
+-- https://github.com/luajit/luajit/issues/76
+-- local format = require('tarantool').build.mod_format
+-- package.cpath = package.cpath:gsub(
+--     '?.so', '?.' .. format
+-- ):gsub('loadall.so', 'loadall.' .. format)

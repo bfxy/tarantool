@@ -56,7 +56,7 @@ add_library(box
     vclock.c
     cluster.cc
     recovery.cc
-    replica.cc
+    applier.cc
     relay.cc
     wal.cc
     ${lua_sources}
@@ -67,6 +67,7 @@ add_library(box
     lua/space.cc
     lua/info.cc
     lua/stat.cc
+    lua/sophia.cc
     lua/error.cc
     lua/session.cc
     lua/net_box.cc

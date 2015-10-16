@@ -33,6 +33,19 @@
 #cmakedefine TARGET_OS_FREEBSD 1
 /*  Defined if building for Darwin */
 #cmakedefine TARGET_OS_DARWIN 1
+
+#ifdef TARGET_OS_LINUX
+#define TARANTOOL_LIBEXT "so"
+#endif
+
+#ifdef TARGET_OS_FREEBSD
+#define TARANTOOL_LIBEXT "so"
+#endif
+
+#ifdef TARGET_OS_DARWIN
+#define TARANTOOL_LIBEXT "dylib"
+#endif
+
 /*
  * Defined if gcov instrumentation should be enabled.
  */
@@ -168,6 +181,16 @@
 #cmakedefine HAVE_FMEMOPEN 1
 
 #cmakedefine HAVE_UUIDGEN 1
+#cmakedefine HAVE_CLOCK_GETTIME 1
+
+/** pthread_np.h - non-portable stuff */
+#cmakedefine HAVE_PTHREAD_NP_H 1
+/** pthread_setname_np(pthread_self(), "") - Linux */
+#cmakedefine HAVE_PTHREAD_SETNAME_NP 1
+/** pthread_setname_np("") - OSX */
+#cmakedefine HAVE_PTHREAD_SETNAME_NP_1 1
+/** pthread_set_name_np(pthread_self(), "") - *BSD */
+#cmakedefine HAVE_PTHREAD_SET_NAME_NP 1
 
 /** \cond public */
 

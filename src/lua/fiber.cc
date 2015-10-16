@@ -439,6 +439,7 @@ lbox_fiber_sleep(struct lua_State *L)
 		luaL_error(L, "fiber.sleep(delay): bad arguments");
 	double delay = lua_tonumber(L, 1);
 	fiber_sleep(delay);
+	fiber_testcancel();
 	return 0;
 }
 
@@ -446,6 +447,7 @@ static int
 lbox_fiber_yield(struct lua_State * /* L */)
 {
 	fiber_sleep(0);
+	fiber_testcancel();
 	return 0;
 }
 
@@ -479,6 +481,12 @@ lbox_fiber_cancel(struct lua_State *L)
 {
 	struct fiber *f = lbox_checkfiber(L, 1);
 	fiber_cancel(f);
+	/*
+	 * Check if we're ourselves cancelled.
+	 * This also implements cancel for the case when
+	 * f == fiber().
+	 */
+	fiber_testcancel();
 	return 0;
 }
 
@@ -493,6 +501,8 @@ lbox_fiber_kill(struct lua_State *L)
 	if (f == NULL)
 		luaL_error(L, "fiber.kill(): fiber not found");
 	fiber_cancel(f);
+	/* Check if we're ourselves cancelled. */
+	fiber_testcancel();
 	return 0;
 }
 

@@ -36,6 +36,7 @@
 #include "box/lua/index.h"
 #include "box/lua/space.h"
 #include "box/lua/stat.h"
+#include "box/lua/sophia.h"
 #include "box/lua/info.h"
 #include "box/lua/session.h"
 #include "box/lua/net_box.h"
@@ -463,9 +464,7 @@ execute_c_call(struct func *func, struct request *request, struct obuf *out)
 	}
 
 	if (rc != 0) {
-		Exception *e = diag_last_error(&fiber()->diag);
-		if (e != NULL)
-			e->raise();
+		fiber_testerror();
 		tnt_raise(ClientError, ER_PROC_C, "unknown procedure error");
 	}
 
@@ -726,8 +725,8 @@ box_lua_init(struct lua_State *L)
 	box_lua_index_init(L);
 	box_lua_space_init(L);
 	box_lua_info_init(L);
-	box_lua_sophia_init(L);
 	box_lua_stat_init(L);
+	box_lua_sophia_init(L);
 	box_lua_session_init(L);
 
 	/* Load Lua extension */

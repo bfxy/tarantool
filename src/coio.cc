@@ -51,12 +51,12 @@ typedef void (*ev_stat_cb)(ev_loop *, ev_stat *, int);
 
 /** Note: this function does not throw */
 void
-coio_init(struct ev_io *coio)
+coio_init(struct ev_io *coio, int fd)
 {
 	/* Prepare for ev events. */
 	coio->data = fiber();
 	ev_init(coio, (ev_io_cb) fiber_schedule_cb);
-	coio->fd = -1;
+	coio->fd = fd;
 }
 
 static inline bool
@@ -592,8 +592,7 @@ coio_service_on_accept(struct evio_service *evio_service,
 			evio_service->on_accept_param;
 	struct ev_io coio;
 
-	coio_init(&coio);
-	coio.fd = fd;
+	coio_init(&coio, fd);
 
 	/* Set connection name. */
 	char fiber_name[SERVICE_NAME_MAXLEN];
@@ -706,3 +705,42 @@ coio_waitpid(pid_t pid)
 	return status;
 }
 
+/* Values of COIO_READ(WRITE) must equal to EV_READ(WRITE) */
+static_assert(COIO_READ == (int) EV_READ, "TNT_IO_READ");
+static_assert(COIO_WRITE == (int) EV_WRITE, "TNT_IO_WRITE");
+
+struct coio_wdata {
+	struct fiber *fiber;
+	int revents;
+};
+
+static void
+coio_wait_cb(struct ev_loop *loop, ev_io *watcher, int revents)
+{
+	(void) loop;
+	struct coio_wdata *wdata = (struct coio_wdata *) watcher->data;
+	wdata->revents = revents;
+	fiber_call(wdata->fiber);
+}
+
+int
+coio_wait(int fd, int events, double timeout)
+{
+	struct ev_io io;
+	coio_init(&io, fd);
+	ev_io_init(&io, coio_wait_cb, fd, events);
+	struct coio_wdata wdata = {
+		/* .fiber =   */ fiber(),
+		/* .revents = */ 0
+	};
+	io.data = &wdata;
+
+	/* A special hack to work with zero timeout */
+	ev_set_priority(&io, EV_MAXPRI);
+	ev_io_start(loop(), &io);
+
+	fiber_yield_timeout(timeout);
+
+	ev_io_stop(loop(), &io);
+	return wdata.revents;
+}
